@@ -47,7 +47,17 @@ impl TraceService for GrpcTraceService {
             .map_err(|_| Status::permission_denied("workspace auth resolution failed"))?;
         process_traces(self.state.clone(), inner, body_size, Some(auth))
             .await
-            .map_err(|e| Status::internal(e.to_string()))?;
+            .map_err(|e| {
+                if let Some(val_err) = e.downcast_ref::<crate::models::span::SpanValidationError>()
+                {
+                    return Status::invalid_argument(val_err.to_string());
+                }
+                let msg = e.to_string();
+                if msg.contains("payload exceeds") || msg.contains("max_spans_per_request") {
+                    return Status::resource_exhausted(msg);
+                }
+                Status::unavailable(msg)
+            })?;
         Ok(Response::new(ExportTraceServiceResponse::default()))
     }
 }

@@ -444,7 +444,7 @@ async fn sql_maintenance_merge_preserves_ducklake_layout() {
     );
     assert_eq!(
         sorted.replace(' ', "").replace('"', ""),
-        "session_id,trace_id,timestamp"
+        "session_id,timestamp,trace_id"
     );
 
     let settings: std::collections::HashMap<String, String> = {

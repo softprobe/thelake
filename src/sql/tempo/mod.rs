@@ -27,6 +27,12 @@ pub(crate) const PERSISTED_OTLP_STATUS_CODES: [(&str, i64); 12] = [
 /// Long enough to cover Tempo query fixture timestamps (~2023) under CI "now".
 /// Still a finite [`QueryWindow`] — never an unbounded lake scan.
 const TEMPO_DEFAULT_LOOKBACK_NS: i64 = 10 * 365 * 24 * 60 * 60 * 1_000_000_000;
+/// Forward clock-skew margin when both `start` and `end` are omitted so newly ingested spans
+/// from slightly ahead browser or backend clocks remain visible on `/api/v2/traces/{id}` and tag discovery.
+const TEMPO_CLOCK_SKEW_NS: i64 = 5 * 60 * 1_000_000_000;
+const TRACE_SCAN_SQL: &str = include_str!("trace_scan.sql");
+const TRACE_ID_FILTER_SQL: &str = include_str!("trace_id_filter.sql");
+const EXCLUDE_RECORDING_FILTER_SQL: &str = include_str!("exclude_recording_filter.sql");
 
 /// Inputs for a Tempo lake scan (protocol adapters map request types here).
 #[derive(Debug, Clone, Copy)]
@@ -43,7 +49,7 @@ pub struct TraceScanParams<'a> {
 /// Resolve exclusive Tempo `[start, end)` for lake scans.
 ///
 /// - Both set and `start < end` → use them
-/// - Both omitted → lookback ending at now
+/// - Both omitted → `[now - lookback, now + clock_skew)`
 /// - Only `end` → `[end - lookback, end)`
 /// - Only `start` → `[start, start + lookback)`
 /// - Zero-width / inverted → error (callers short-circuit zero-width)
@@ -56,10 +62,11 @@ fn resolve_tempo_scan_window(
         (Some(start), Some(end)) if start == end => Err("empty_tempo_window".to_string()),
         (Some(_), Some(_)) => Err("`start` must be < `end`".to_string()),
         (None, None) => {
-            let end = chrono::Utc::now()
+            let now = chrono::Utc::now()
                 .timestamp_nanos_opt()
                 .ok_or_else(|| "current time out of range".to_string())?;
-            let start = end.saturating_sub(TEMPO_DEFAULT_LOOKBACK_NS);
+            let end = now.saturating_add(TEMPO_CLOCK_SKEW_NS);
+            let start = now.saturating_sub(TEMPO_DEFAULT_LOOKBACK_NS);
             Ok((start, end))
         }
         (None, Some(end)) => {
@@ -131,33 +138,68 @@ fn compile_trace_scan_sql(
         duration_predicates.join(" AND ")
     };
     let cap = trace_scan_cap(params.limit);
+    let trace_limit = if trace_id.is_some() {
+        cap
+    } else {
+        params.limit.max(1)
+    };
     let trace_id = trace_id.map(str::to_owned);
+    let default_observation_filter = if trace_id.is_none() && !query_mentions_recording(&params) {
+        EXCLUDE_RECORDING_FILTER_SQL
+    } else {
+        ""
+    };
 
     Ok(window
         .scan_with_timestamp_filter("", |bound| {
-            let where_base = match trace_id.as_deref() {
-                Some(id) => format!("trace_id = {} AND {bound}", sql_string_literal(id)),
-                None => bound.to_string(),
+            let trace_id_prefix = match trace_id.as_deref() {
+                Some(id) => TRACE_ID_FILTER_SQL.replace("{{trace_id}}", &sql_string_literal(id)),
+                None => String::new(),
             };
-            format!(
-                "WITH base AS (SELECT trace_id, span_id, parent_span_id, message_type, span_kind, app_id, \
-                 CAST(epoch_ns(timestamp) AS BIGINT) AS start_time_unix_nano, \
-                 CAST(epoch_ns(end_timestamp) AS BIGINT) AS end_time_unix_nano, \
-                 CAST(attributes AS JSON) AS attributes, CAST(resource_attributes AS JSON) AS resource_attributes, \
-                 CAST(instrumentation_scope AS JSON) AS instrumentation_scope, CAST(links AS JSON) AS links, \
-                 status_code, status_message, \
-                 events, \
-                 observation_type, model_name, model_provider, user_id, session_attr_id, service_name \
-                 FROM traces WHERE {where_base}), \
-                 matching_traces AS (SELECT DISTINCT trace_id FROM base WHERE {row_predicate}), \
-                 qualified_traces AS (SELECT trace_id FROM base GROUP BY trace_id HAVING {duration_predicate} ) \
-                 SELECT base.* FROM base \
-                 INNER JOIN matching_traces USING (trace_id) \
-                 INNER JOIN qualified_traces USING (trace_id) \
-                 ORDER BY base.trace_id ASC, base.start_time_unix_nano ASC, base.span_id ASC LIMIT {cap}"
-            )
+            TRACE_SCAN_SQL
+                .replace("{{trace_id_prefix}}", &trace_id_prefix)
+                .replace("{{timestamp_filter}}", bound)
+                .replace("{{default_observation_filter}}", default_observation_filter)
+                .replace("{{row_predicate}}", &row_predicate)
+                .replace("{{duration_predicate}}", &duration_predicate)
+                .replace("{{trace_limit}}", &trace_limit.to_string())
+                .replace("{{cap}}", &cap.to_string())
         })
         .into_sql())
+}
+
+fn query_mentions_recording(params: &TraceScanParams<'_>) -> bool {
+    if params
+        .tags
+        .iter()
+        .any(|(k, v)| k.contains("recording") || v.contains("recording"))
+    {
+        return true;
+    }
+    params.selector.is_some_and(selector_mentions_recording)
+}
+
+fn selector_mentions_recording(selector: &TraceSelector) -> bool {
+    use crate::compat::tempo::traceql::TracePredicate;
+    match selector {
+        TraceSelector::All => false,
+        TraceSelector::And(left, right) | TraceSelector::Or(left, right) => {
+            selector_mentions_recording(left) || selector_mentions_recording(right)
+        }
+        TraceSelector::Predicate(predicate) => {
+            let value = match predicate {
+                TracePredicate::Eq(_, v)
+                | TracePredicate::NotEq(_, v)
+                | TracePredicate::Regex(_, v)
+                | TracePredicate::NotRegex(_, v)
+                | TracePredicate::Greater(_, v)
+                | TracePredicate::GreaterOrEqual(_, v)
+                | TracePredicate::Less(_, v)
+                | TracePredicate::LessOrEqual(_, v) => v.as_str(),
+            };
+            value.contains("recording")
+        }
+    }
 }
 
 pub fn trace_scan_cap(limit: usize) -> usize {
@@ -216,10 +258,20 @@ fn promoted_attr_expr(key: &str) -> Option<String> {
             "attributes",
             "sp.user.id",
         )),
-        "sp.session.id" => Some(prefer_attr_varchar(
-            Some("session_attr_id"),
-            "attributes",
-            "sp.session.id",
+        "sp.session.id" | "session.id" => Some(format!(
+            "COALESCE(NULLIF(session_id, ''), session_attr_id, {}, {})",
+            prefer_attr_varchar(None, "attributes", "sp.session.id"),
+            prefer_attr_varchar(None, "attributes", "session.id")
+        )),
+        "sp.agent.id" => Some(format!(
+            "COALESCE(NULLIF(agent_id, ''), {}, {})",
+            json_string("attributes", "sp.agent.id"),
+            json_string("resource_attributes", "sp.agent.id")
+        )),
+        "sp.agent.name" => Some(format!(
+            "COALESCE(NULLIF(agent_name, ''), {}, {})",
+            json_string("attributes", "sp.agent.name"),
+            json_string("resource_attributes", "sp.agent.name")
         )),
         "service.name" => Some(format!(
             "COALESCE(service_name, {}, {}, app_id)",
@@ -270,6 +322,7 @@ fn tag_predicate_sql(key: &str, expected: &str) -> String {
 
 fn selector_sql(selector: &TraceSelector) -> String {
     match selector {
+        TraceSelector::All => "TRUE".to_string(),
         TraceSelector::Predicate(predicate) => predicate_sql(predicate),
         TraceSelector::And(left, right) => {
             format!("({} AND {})", selector_sql(left), selector_sql(right))
@@ -293,11 +346,18 @@ fn predicate_sql(predicate: &crate::compat::tempo::traceql::TracePredicate) -> S
         TracePredicate::LessOrEqual(field, expected) => (field, "<=", expected),
     };
     let actual = match field {
-        TraceField::Span(key) if key == "status_code" || key == "status" => span_status_code_sql(),
-        TraceField::Span(key) => span_attribute_value(key),
+        TraceField::Span(key) | TraceField::Unscoped(key)
+            if key == "status_code" || key == "status" =>
+        {
+            span_status_code_sql()
+        }
+        TraceField::Span(key) | TraceField::Unscoped(key) => span_attribute_value(key),
         TraceField::Resource(key) => {
-            if key == "service.name" {
-                promoted_attr_expr("service.name").expect("service.name mapping")
+            if matches!(
+                key.as_str(),
+                "service.name" | "sp.agent.id" | "sp.agent.name"
+            ) {
+                promoted_attr_expr(key).expect("promoted resource mapping")
             } else {
                 json_string("resource_attributes", key)
             }

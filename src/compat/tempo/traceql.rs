@@ -2,6 +2,7 @@ use crate::compat::errors::CompatError;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TraceSelector {
+    All,
     Predicate(TracePredicate),
     And(Box<TraceSelector>, Box<TraceSelector>),
     Or(Box<TraceSelector>, Box<TraceSelector>),
@@ -9,6 +10,7 @@ pub enum TraceSelector {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TraceField {
+    Unscoped(String),
     Span(String),
     Resource(String),
     Instrumentation(String),
@@ -83,6 +85,10 @@ impl<'a> Parser<'a> {
         self.skip_ws();
         if !self.take(b'{') {
             return Err(bad("TraceQL selector must start with '{'"));
+        }
+        self.skip_ws();
+        if self.take(b'}') {
+            return Ok(TraceSelector::All);
         }
         let expression = self.parse_or()?;
         self.skip_ws();
@@ -160,6 +166,12 @@ impl<'a> Parser<'a> {
         let raw = self.parse_word()?;
         if raw.is_empty() {
             return Err(bad("TraceQL field is required"));
+        }
+        if let Some(field) = raw.strip_prefix('.') {
+            if field.is_empty() {
+                return Err(bad("TraceQL unscoped attribute name is required"));
+            }
+            return Ok(TraceField::Unscoped(field.to_string()));
         }
         if let Some(field) = raw.strip_prefix("span.") {
             return Ok(TraceField::Span(field.to_string()));
@@ -384,7 +396,9 @@ fn validate_predicate_types(predicate: &TracePredicate) -> Result<(), CompatErro
 
 pub fn is_status_field(field: &TraceField) -> bool {
     match field {
-        TraceField::Span(key) => matches!(key.as_str(), "status" | "status_code"),
+        TraceField::Span(key) | TraceField::Unscoped(key) => {
+            matches!(key.as_str(), "status" | "status_code")
+        }
         TraceField::Intrinsic(key) => matches!(
             key.as_str(),
             "status"
@@ -413,7 +427,7 @@ pub fn canonical_status_code(value: &str) -> Option<i64> {
 
 pub fn is_numeric_field(field: &TraceField) -> bool {
     match field {
-        TraceField::Span(key) => matches!(
+        TraceField::Span(key) | TraceField::Unscoped(key) => matches!(
             key.as_str(),
             "http.status_code" | "http.response.status_code"
         ),
@@ -560,5 +574,16 @@ mod tests {
         let err = parse_traceql(r#"{ span.http.status_code >= 500.5 }"#)
             .expect_err("fractional numeric predicate");
         assert_eq!(err.code, CompatErrorCode::BadRequest);
+    }
+
+    #[test]
+    fn parses_empty_selector_and_unscoped_dot_attributes() {
+        parse_traceql("{}").expect("empty TraceQL selector");
+        parse_traceql("{   }").expect("whitespace-only TraceQL selector");
+        parse_traceql(
+            r#"{ .http.request.method = "POST" && .http.response.status_code >= 500 && .sp.session.id =~ ".+" }"#,
+        )
+        .expect("unscoped dot attributes with string, numeric, and regex");
+        parse_traceql(r#"{ .sp.session.id !~ ".+" }"#).expect("unscoped negative regex");
     }
 }

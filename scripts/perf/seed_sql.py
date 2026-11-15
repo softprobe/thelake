@@ -9,8 +9,8 @@ from __future__ import annotations
 # Mirror src/sql/schema/mod.rs
 ONE_CLOCK_PARTITION_BY = "year(timestamp), month(timestamp), day(timestamp)"
 SORTED_BY = {
-    "traces": "session_id, trace_id, timestamp",
-    "logs": "session_id, timestamp",
+    "traces": "session_id, timestamp, trace_id",
+    "logs": "session_id, timestamp, trace_id",
 }
 
 

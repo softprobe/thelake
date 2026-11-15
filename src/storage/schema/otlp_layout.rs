@@ -93,7 +93,7 @@ mod tests {
             let order = insert_order_by(layout.name);
             assert!(order.starts_with("ORDER BY "), "{}: {order}", layout.name);
             assert!(!order.contains("record_date"), "{}: {order}", layout.name);
-            assert!(order.contains("session_id, trace_id, timestamp"), "{order}");
+            assert!(order.contains("session_id, timestamp, trace_id"), "{order}");
         }
     }
 

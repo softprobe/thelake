@@ -150,10 +150,14 @@ impl IngestEngine {
                     Box::pin(async move {
                         let rows: u64 = batches.iter().map(|b| b.len() as u64).sum();
                         // Fold before the storage commit because the commit consumes batches.
-                        let hints = if dirty.is_some() {
-                            crate::session_summary::fold_dirty_hints(batches.iter().flatten())
-                        } else {
-                            Vec::new()
+                        let hints = match dirty.as_deref() {
+                            Some(dirty_writer) => crate::session_summary::fold_dirty_hints(
+                                batches
+                                    .iter()
+                                    .flatten()
+                                    .filter(|span| dirty_writer.allow_span(span)),
+                            ),
+                            None => Vec::new(),
                         };
                         let manifests = resolver
                             .load_active_telemetry_columns_manifests_for_scope(w.metadata_schema())

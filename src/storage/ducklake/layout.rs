@@ -160,7 +160,7 @@ mod tests {
             profile.partition_by,
             "year(timestamp), month(timestamp), day(timestamp)"
         );
-        assert_eq!(profile.sorted_by, "session_id, trace_id, timestamp");
+        assert_eq!(profile.sorted_by, "session_id, timestamp, trace_id");
         assert_eq!(profile.row_group_size_bytes, 8 * 1024 * 1024);
         assert_eq!(profile.target_file_size_bytes, 128 * 1024 * 1024);
         assert_eq!(profile.parquet_compression, "zstd");

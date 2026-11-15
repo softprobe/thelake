@@ -190,43 +190,231 @@ pub const SEARCH_FIELDS: &[FieldSpec] = &[
         projectable: true,
         ops: STRING_OPS,
     },
+    FieldSpec {
+        key: "agent_name",
+        sql: "agent_name",
+        value_type: "string",
+        entity: "trace",
+        filterable: true,
+        sortable: true,
+        projectable: true,
+        ops: STRING_OPS,
+    },
+    FieldSpec {
+        key: "agent_id",
+        sql: "agent_id",
+        value_type: "string",
+        entity: "trace",
+        filterable: true,
+        sortable: true,
+        projectable: true,
+        ops: ID_OPS,
+    },
 ];
+
+const SEARCH_TRACES_SQL: &str = include_str!("search_traces.sql");
+const SESSION_SCOPE_FILTER_SQL: &str = include_str!("session_scope_filter.sql");
+const TRACE_SESSION_EXPR_SQL: &str = include_str!("trace_session_expr.sql");
 
 /// Compile the typed telemetry search request into an allowlisted DuckDB query.
 pub fn compile_search_sql(request: &TelemetrySearchRequest) -> Result<String, String> {
     if request.version != 1 {
         return Err("unsupported telemetry search version".to_string());
     }
-    if request.cursor.is_some() {
-        return Err("cursor pagination is not implemented for this endpoint".to_string());
-    }
     let time_range = request
         .time_range
         .as_ref()
         .ok_or_else(|| "timeRange is required".to_string())?;
     let window = query_window_from_time_range(time_range)?;
-
-    let filter_pred = match &request.filter {
-        Some(filter) => Some(compile_filter_expr(filter)?),
-        None => None,
-    };
-    let mut conditions = Vec::new();
-    push_otlp_time_predicates(&mut conditions, &window, filter_pred);
-    let where_sql = if conditions.is_empty() {
-        String::new()
-    } else {
-        format!("WHERE {}", conditions.join(" AND "))
-    };
-
     let limit = request.limit.unwrap_or(100).clamp(1, 1000);
-    let order_sql = compile_order(&request.sort)?;
 
-    let sql = match request.scope {
-        TelemetrySearchScope::Sessions => super::search_sessions_sql(&where_sql, &order_sql, limit),
-        TelemetrySearchScope::Traces => super::search_traces_sql(&where_sql, &order_sql, limit),
+    match request.scope {
+        TelemetrySearchScope::Sessions => {
+            if request.cursor.is_some() {
+                return Err("cursor pagination is not implemented for this endpoint".to_string());
+            }
+            let obs_expr = crate::sql::llm::llm_promo().observation_type;
+            let mut extra = vec![SESSION_SCOPE_FILTER_SQL
+                .trim()
+                .replace("{{observation_type}}", obs_expr)];
+            if let Some(filter) = &request.filter {
+                extra.push(compile_filter_expr(filter)?);
+            }
+            let mut conditions = Vec::new();
+            push_otlp_time_predicates(&mut conditions, &window, extra);
+            let where_sql = if conditions.is_empty() {
+                String::new()
+            } else {
+                format!("WHERE {}", conditions.join(" AND "))
+            };
+            let order_sql = compile_order(&request.sort)?;
+            Ok(super::search_sessions_sql(&where_sql, &order_sql, limit))
+        }
+        TelemetrySearchScope::Traces => compile_trace_search_sql(request, &window, limit),
+    }
+}
+
+fn compile_trace_search_sql(
+    request: &TelemetrySearchRequest,
+    window: &QueryWindow,
+    limit: usize,
+) -> Result<String, String> {
+    let is_timestamp_desc = request.sort.is_empty()
+        || (request.sort.len() == 1
+            && request.sort[0].field == "timestamp"
+            && request.sort[0].direction == TelemetrySortDirection::Desc);
+    if request.cursor.is_some() && !is_timestamp_desc {
+        return Err(
+            "cursor pagination for trace search requires default timestamp desc sort".to_string(),
+        );
+    }
+    let cursor_filter = match request.cursor.as_deref() {
+        Some(cursor) => crate::sql::paging::cursor_predicate(cursor, "end_time", "trace_id")?,
+        None => "TRUE".to_string(),
     };
+    let order_sql = compile_trace_order(&request.sort)?;
+    let having_filter = match &request.filter {
+        Some(filter) => compile_trace_having_expr(filter)?,
+        None => "TRUE".to_string(),
+    };
+    let where_prefix = match &request.filter {
+        Some(filter) => extract_trace_where_prefix(filter)?,
+        None => String::new(),
+    };
+    let obs_expr = crate::sql::llm::llm_promo().observation_type;
+    let fetch_limit = (limit + 1).to_string();
 
-    Ok(sql)
+    Ok(window
+        .scan_with_timestamp_filter("", |bound| {
+            SEARCH_TRACES_SQL
+                .replace("{{where_prefix}}", &where_prefix)
+                .replace("{{timestamp_filter}}", bound)
+                .replace("{{observation_type}}", obs_expr)
+                .replace("{{having_filter}}", &having_filter)
+                .replace("{{cursor_filter}}", &cursor_filter)
+                .replace("{{order_sql}}", &order_sql)
+                .replace("{{fetch_limit}}", &fetch_limit)
+        })
+        .into_sql())
+}
+
+fn compile_trace_order(sort: &[TelemetrySort]) -> Result<String, String> {
+    if sort.is_empty() {
+        return Ok("ORDER BY end_time DESC, trace_id DESC".to_string());
+    }
+    let mut parts = Vec::new();
+    for sort_item in sort {
+        let sql = match sort_item.field.as_str() {
+            "timestamp" => "end_time",
+            "duration_ms" => "duration_ms",
+            "error_count" => "error_count",
+            "span_count" => "span_count",
+            "session_id" => "session_id",
+            "trace_id" => "trace_id",
+            "service.name" => "services",
+            "http_request_method" => "http_request_method",
+            "http_request_path" => "entry_path",
+            "http_response_status_code" => "http_response_status_code",
+            "status_code" => "status_code",
+            "agent_name" => "agent_name",
+            "agent_id" => "agent_id",
+            other => return Err(format!("unsupported sort field: {other}")),
+        };
+        let dir = match sort_item.direction {
+            TelemetrySortDirection::Asc => "ASC",
+            TelemetrySortDirection::Desc => "DESC",
+        };
+        parts.push(format!("{sql} {dir}"));
+    }
+    let base = format!("ORDER BY {}", parts.join(", "));
+    if sort.len() == 1
+        && sort[0].field == "timestamp"
+        && sort[0].direction == TelemetrySortDirection::Asc
+    {
+        Ok(format!("{base}, trace_id ASC"))
+    } else {
+        Ok(format!("{base}, trace_id DESC"))
+    }
+}
+
+fn compile_trace_having_expr(expr: &TelemetryFilterExpr) -> Result<String, String> {
+    match expr {
+        TelemetryFilterExpr::And { and } => {
+            if and.is_empty() {
+                return Err("compound filter cannot be empty".to_string());
+            }
+            let parts = and
+                .iter()
+                .map(compile_trace_having_expr)
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(format!("({})", parts.join(" AND ")))
+        }
+        TelemetryFilterExpr::Or { or } => {
+            if or.is_empty() {
+                return Err("compound filter cannot be empty".to_string());
+            }
+            let parts = or
+                .iter()
+                .map(compile_trace_having_expr)
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(format!("({})", parts.join(" OR ")))
+        }
+        TelemetryFilterExpr::Predicate(filter) => {
+            if filter.field == "session_id" {
+                let session_expr = TRACE_SESSION_EXPR_SQL.trim();
+                if filter.op == "exists" {
+                    let non_empty = TelemetryFilter {
+                        field: "session_id".to_string(),
+                        op: "neq".to_string(),
+                        value: Some(Value::String(String::new())),
+                    };
+                    compile_filter_with_expr(&non_empty, session_expr)
+                } else {
+                    compile_filter_with_expr(filter, session_expr)
+                }
+            } else {
+                let span_pred = compile_filter(filter)?;
+                Ok(format!("COALESCE(bool_or({span_pred}), FALSE)"))
+            }
+        }
+    }
+}
+
+fn collect_and_predicates<'a>(expr: &'a TelemetryFilterExpr, out: &mut Vec<&'a TelemetryFilter>) {
+    match expr {
+        TelemetryFilterExpr::Predicate(filter) => out.push(filter),
+        TelemetryFilterExpr::And { and } => {
+            for item in and {
+                collect_and_predicates(item, out);
+            }
+        }
+        TelemetryFilterExpr::Or { .. } => {}
+    }
+}
+
+fn extract_trace_where_prefix(expr: &TelemetryFilterExpr) -> Result<String, String> {
+    let mut flat = Vec::new();
+    collect_and_predicates(expr, &mut flat);
+    let mut clauses = Vec::new();
+    for filter in flat {
+        if let Some(clause) = trace_identity_where_clause(filter)? {
+            clauses.push(clause);
+        }
+    }
+    if clauses.is_empty() {
+        Ok(String::new())
+    } else {
+        Ok(format!("{} AND ", clauses.join(" AND ")))
+    }
+}
+
+fn trace_identity_where_clause(filter: &TelemetryFilter) -> Result<Option<String>, String> {
+    match filter.field.as_str() {
+        "trace_id" | "agent_id" if matches!(filter.op.as_str(), "eq" | "in") => {
+            Ok(Some(compile_filter(filter)?))
+        }
+        _ => Ok(None),
+    }
 }
 
 fn approve(sql: String) -> Result<crate::sql::trusted::TrustedSql, String> {
@@ -380,13 +568,19 @@ pub fn compile_filter(filter: &TelemetryFilter) -> Result<String, String> {
     let spec = field_spec(&filter.field)
         .filter(|field| field.filterable)
         .ok_or_else(|| format!("unknown filter field: {}", filter.field))?;
+    compile_filter_with_expr(filter, spec.sql)
+}
+
+fn compile_filter_with_expr(filter: &TelemetryFilter, sql: &str) -> Result<String, String> {
+    let spec = field_spec(&filter.field)
+        .filter(|field| field.filterable)
+        .ok_or_else(|| format!("unknown filter field: {}", filter.field))?;
     if !spec.ops.contains(&filter.op.as_str()) {
         return Err(format!(
             "operator {} is not allowed for field {}",
             filter.op, filter.field
         ));
     }
-    let sql = spec.sql;
     let literal = |value: &Value| -> Result<String, String> {
         if spec.value_type == "timestamp" {
             Ok(timestamp_ns_literal_from_str(&string_value(value)?))
@@ -563,6 +757,26 @@ mod tests {
             scope: TelemetrySearchScope::Traces,
             time_range: Some(range.clone()),
             filter: Some(TelemetryFilterExpr::Predicate(TelemetryFilter {
+                field: "trace_id".into(),
+                op: "eq".into(),
+                value: Some(json!("tr-1")),
+            })),
+            columns: Vec::new(),
+            sort: Vec::new(),
+            limit: Some(10),
+            cursor: None,
+        })
+        .unwrap();
+        assert_sql_has_otlp_time_predicates(&filtered);
+        let id = filtered.find("trace_id = 'tr-1'").unwrap();
+        let ts = filtered.find("timestamp >=").unwrap();
+        assert!(id < ts, "search filter before timestamp: {filtered}");
+
+        let session_filtered = compile_search_sql(&TelemetrySearchRequest {
+            version: 1,
+            scope: TelemetrySearchScope::Traces,
+            time_range: Some(range.clone()),
+            filter: Some(TelemetryFilterExpr::Predicate(TelemetryFilter {
                 field: "session_id".into(),
                 op: "eq".into(),
                 value: Some(json!("sess-1")),
@@ -573,10 +787,12 @@ mod tests {
             cursor: None,
         })
         .unwrap();
-        assert_sql_has_otlp_time_predicates(&filtered);
-        let id = filtered.find("session_id = 'sess-1'").unwrap();
-        let ts = filtered.find("timestamp >=").unwrap();
-        assert!(id < ts, "search filter before timestamp: {filtered}");
+        let group_idx = session_filtered.find("GROUP BY trace_id").unwrap();
+        let session_idx = session_filtered.find("= 'sess-1'").unwrap();
+        assert!(
+            session_idx > group_idx,
+            "session_id filter on trace search must evaluate in HAVING after GROUP BY trace_id: {session_filtered}"
+        );
 
         let details = compile_details_sql(
             &TelemetryDetailsTarget {
@@ -637,5 +853,73 @@ mod tests {
         let compiled = compile_details_sql(&target, &range, 50).unwrap();
         let trusted = details_spans(&target, &range, 50).expect("approve");
         assert_eq!(trusted.as_str(), compiled.spans);
+    }
+
+    #[test]
+    fn trace_search_groups_by_trace_id_excludes_recording_and_supports_agent_and_cursor() {
+        let range = TelemetryTimeRange {
+            from: "2026-05-03T10:00:00Z".into(),
+            to: "2026-05-03T11:00:00Z".into(),
+        };
+        let ts = chrono::DateTime::parse_from_rfc3339("2026-05-03T10:30:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let cursor = crate::sql::paging::encode_cursor(ts, "tr-99");
+
+        let sql = compile_search_sql(&TelemetrySearchRequest {
+            version: 1,
+            scope: TelemetrySearchScope::Traces,
+            time_range: Some(range.clone()),
+            filter: Some(TelemetryFilterExpr::And {
+                and: vec![
+                    TelemetryFilterExpr::Predicate(TelemetryFilter {
+                        field: "agent_name".into(),
+                        op: "eq".into(),
+                        value: Some(json!("checkout-web")),
+                    }),
+                    TelemetryFilterExpr::Predicate(TelemetryFilter {
+                        field: "agent_id".into(),
+                        op: "eq".into(),
+                        value: Some(json!("ag-1")),
+                    }),
+                ],
+            }),
+            columns: Vec::new(),
+            sort: Vec::new(),
+            limit: Some(25),
+            cursor: Some(cursor),
+        })
+        .expect("trace search with agent filters and cursor must compile");
+
+        assert!(
+            !sql.contains("GROUP BY trace_id, session_id"),
+            "trace search must group by trace_id only: {sql}"
+        );
+        assert!(
+            sql.contains("<> 'recording'"),
+            "must exclude recording spans: {sql}"
+        );
+        assert!(
+            sql.contains("<> 'http_body'"),
+            "must exclude http_body from counts: {sql}"
+        );
+        assert!(sql.contains("agent_name = 'checkout-web'"), "{sql}");
+        assert!(sql.contains("agent_id = 'ag-1'"), "{sql}");
+        assert!(
+            sql.contains("LIMIT 26"),
+            "must fetch limit+1 for cursor detection: {sql}"
+        );
+
+        let bad_cursor = compile_search_sql(&TelemetrySearchRequest {
+            version: 1,
+            scope: TelemetrySearchScope::Traces,
+            time_range: Some(range),
+            filter: None,
+            columns: Vec::new(),
+            sort: Vec::new(),
+            limit: Some(10),
+            cursor: Some("%%%invalid%%%".into()),
+        });
+        assert!(bad_cursor.is_err());
     }
 }

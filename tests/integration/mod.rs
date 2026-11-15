@@ -21,6 +21,8 @@ pub mod promotion_telemetry_columns;
 pub mod promotion_telemetry_ingest;
 #[cfg(feature = "integration-e2e")]
 pub mod qualification_contract;
+pub mod session_trace_parquet_layout;
+pub mod stateless_agent_trace_ingest;
 #[cfg(feature = "integration-e2e")]
 pub mod workspace_ducklake_registry;
 #[cfg(feature = "integration-e2e")]

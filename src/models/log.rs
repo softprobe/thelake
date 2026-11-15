@@ -61,6 +61,7 @@ impl Log {
         self.session_id
             .cmp(&other.session_id)
             .then_with(|| self.timestamp.cmp(&other.timestamp))
+            .then_with(|| self.trace_id.cmp(&other.trace_id))
     }
 
     /// Convert a batch of Logs to Arrow RecordBatch for DuckLake storage

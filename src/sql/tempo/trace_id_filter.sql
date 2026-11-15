@@ -1,0 +1,1 @@
+trace_id = {{trace_id}} AND 

@@ -197,7 +197,25 @@ pub async fn execute_dynamic_search(
     let ws = resolve_workspace(state, auth).await?;
     let result =
         map_execute_result(ws.query().execute_trusted(trusted).await).map_err(storage_error)?;
-    let rows = rows_to_search_response(&request.scope, &result.columns, &result.rows);
+    let limit = request.limit.unwrap_or(100).clamp(1, 1000);
+    let (visible_rows, next_cursor) =
+        if request.scope == TelemetrySearchScope::Traces && result.rows.len() > limit {
+            let page = &result.rows[..limit];
+            let cursor = page
+                .last()
+                .and_then(|last| {
+                    let end_time = optional_timestamp(&result.columns, last, "end_time")?;
+                    let trace_id = required_string(&result.columns, last, "trace_id")?;
+                    Some(Value::String(crate::sql::paging::encode_cursor(
+                        end_time, &trace_id,
+                    )))
+                })
+                .unwrap_or(Value::Null);
+            (page, cursor)
+        } else {
+            (result.rows.as_slice(), Value::Null)
+        };
+    let rows = rows_to_search_response(&request.scope, &result.columns, visible_rows);
 
     Ok(json!({
         "version": 1,
@@ -207,7 +225,7 @@ pub async fn execute_dynamic_search(
         },
         "columns": selected_columns(&request.columns),
         "rows": rows,
-        "nextCursor": Value::Null,
+        "nextCursor": next_cursor,
         "query": { "compiled": false }
     }))
 }
@@ -255,9 +273,19 @@ pub fn rows_to_objects(columns: &[String], rows: &[Vec<Value>]) -> Vec<Value> {
             for (idx, column) in columns.iter().enumerate() {
                 let raw = row.get(idx).cloned().unwrap_or(Value::Null);
                 let value = match column.as_str() {
+                    "session_id" => match raw.as_str() {
+                        Some("") => Value::Null,
+                        _ => raw,
+                    },
                     "attributes" | "resource_attributes" => {
                         strip_projected_attribute_map_prefixes(parse_projected_json_value(raw))
                     }
+                    "start_time" | "end_time" | "timestamp" | "end_timestamp"
+                    | "observed_timestamp" => parse_timestamp_value(&raw)
+                        .map(|dt| {
+                            Value::String(dt.to_rfc3339_opts(chrono::SecondsFormat::AutoSi, true))
+                        })
+                        .unwrap_or(raw),
                     _ => raw,
                 };
                 object.insert(column.clone(), value);
@@ -321,7 +349,7 @@ fn rows_to_search_response(
                     "lastError": row.get("last_error").cloned().unwrap_or(Value::Null),
                 }),
                 TelemetrySearchScope::Traces => json!({
-                    "sessionId": row.get("session_id").cloned().unwrap_or(Value::Null),
+                    "sessionId": optional_non_empty_cell(row.get("session_id")),
                     "traceId": row.get("trace_id").cloned().unwrap_or(Value::Null),
                     "spanCount": numeric_cell(row.get("span_count")),
                     "errorCount": numeric_cell(row.get("error_count")),
@@ -329,7 +357,11 @@ fn rows_to_search_response(
                     "services": services,
                     "name": row.get("name").cloned().unwrap_or(Value::Null),
                     "entryPath": row.get("entry_path").cloned().unwrap_or(Value::Null),
-                    "lastError": row.get("last_error").cloned().unwrap_or(Value::Null),
+                    "httpMethod": optional_non_empty_cell(row.get("http_request_method")),
+                    "httpStatusCode": nullable_numeric_cell(row.get("http_response_status_code")),
+                    "agentId": optional_non_empty_cell(row.get("agent_id")),
+                    "agentName": optional_non_empty_cell(row.get("agent_name")),
+                    "lastError": optional_non_empty_cell(row.get("last_error")),
                 }),
             };
             json!({
@@ -358,6 +390,32 @@ fn numeric_cell(value: Option<&Value>) -> Value {
             .or_else(|_| s.parse::<f64>().map(Value::from))
             .unwrap_or(Value::Null),
         _ => json!(0),
+    }
+}
+
+fn nullable_numeric_cell(value: Option<&Value>) -> Value {
+    match value {
+        Some(Value::Number(_)) => value.cloned().unwrap(),
+        Some(Value::String(s)) => s
+            .parse::<i64>()
+            .map(Value::from)
+            .or_else(|_| s.parse::<f64>().map(Value::from))
+            .unwrap_or(Value::Null),
+        _ => Value::Null,
+    }
+}
+
+fn optional_non_empty_cell(value: Option<&Value>) -> Value {
+    match value {
+        Some(Value::String(s)) => {
+            let trimmed = s.trim();
+            if trimmed.is_empty() {
+                Value::Null
+            } else {
+                Value::String(trimmed.to_string())
+            }
+        }
+        _ => Value::Null,
     }
 }
 
@@ -443,5 +501,60 @@ mod tests {
             objects[0]["resource_attributes"]["service.name"],
             "travel-agent"
         );
+    }
+
+    #[test]
+    fn trace_search_response_formats_nanosecond_timestamps_and_null_empty_session() {
+        let columns = vec![
+            "id".to_string(),
+            "kind".to_string(),
+            "session_id".to_string(),
+            "trace_id".to_string(),
+            "start_time".to_string(),
+            "end_time".to_string(),
+            "span_count".to_string(),
+            "error_count".to_string(),
+            "duration_ms".to_string(),
+            "services".to_string(),
+            "name".to_string(),
+            "http_request_method".to_string(),
+            "entry_path".to_string(),
+            "http_response_status_code".to_string(),
+            "agent_id".to_string(),
+            "agent_name".to_string(),
+            "last_error".to_string(),
+        ];
+        let rows = vec![vec![
+            Value::String("tr-1".to_string()),
+            Value::String("trace".to_string()),
+            Value::String(String::new()),
+            Value::String("tr-1".to_string()),
+            Value::String("Nanosecond:1777802400000000000".to_string()),
+            Value::String("Nanosecond:1777802401500000000".to_string()),
+            json!(2),
+            json!(1),
+            json!(1500),
+            Value::String("web,api".to_string()),
+            Value::String("POST /api/pay".to_string()),
+            Value::String("POST".to_string()),
+            Value::String("/api/pay".to_string()),
+            json!(502),
+            Value::String("ag-1".to_string()),
+            Value::String("checkout-web".to_string()),
+            Value::String("upstream timeout".to_string()),
+        ]];
+        let mapped = rows_to_search_response(&TelemetrySearchScope::Traces, &columns, &rows);
+        assert_eq!(mapped.len(), 1);
+        assert!(
+            mapped[0]["summary"]["sessionId"].is_null(),
+            "empty session_id must map to null: {}",
+            mapped[0]
+        );
+        assert_eq!(mapped[0]["summary"]["agentName"], "checkout-web");
+        assert_eq!(mapped[0]["summary"]["agentId"], "ag-1");
+        assert_eq!(mapped[0]["summary"]["httpMethod"], "POST");
+        assert_eq!(mapped[0]["summary"]["httpStatusCode"], 502);
+        assert_eq!(mapped[0]["timeRange"]["from"], "2026-05-03T10:00:00Z");
+        assert_eq!(mapped[0]["timeRange"]["to"], "2026-05-03T10:00:01.500Z");
     }
 }

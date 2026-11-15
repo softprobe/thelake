@@ -24,12 +24,43 @@ pub fn search_response(hits: &[TraceSearchHit], max_bytes: usize) -> Result<Resp
     let traces = hits
         .iter()
         .map(|hit| {
+            let service_stats = hit
+                .service_stats
+                .iter()
+                .map(|(service, stats)| {
+                    let mut obj = Map::new();
+                    obj.insert("spanCount".into(), json!(stats.span_count));
+                    if stats.error_count > 0 {
+                        obj.insert("errorCount".into(), json!(stats.error_count));
+                    }
+                    (service.clone(), Value::Object(obj))
+                })
+                .collect::<Map<_, _>>();
+            let span_set_spans = hit
+                .span_set
+                .spans
+                .iter()
+                .map(|summary| {
+                    json!({
+                        "spanID": summary.span_id,
+                        "name": summary.name,
+                        "startTimeUnixNano": summary.start_time_unix_nano.to_string(),
+                        "durationNanos": summary.duration_nanos.to_string(),
+                        "attributes": attributes(&summary.attributes),
+                    })
+                })
+                .collect::<Vec<_>>();
             json!({
                 "traceID": hit.trace_id,
                 "rootServiceName": hit.root_service_name,
                 "rootTraceName": hit.root_trace_name,
                 "startTimeUnixNano": hit.start_time_unix_nano.to_string(),
                 "durationMs": hit.duration_ms,
+                "serviceStats": Value::Object(service_stats),
+                "spanSet": {
+                    "spans": span_set_spans,
+                    "matched": hit.span_set.matched,
+                },
             })
         })
         .collect::<Vec<_>>();

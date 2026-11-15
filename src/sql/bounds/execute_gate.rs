@@ -1230,6 +1230,9 @@ mod tests {
              ALTER TABLE traces ADD COLUMN message_type VARCHAR;\
              ALTER TABLE traces ADD COLUMN span_kind VARCHAR;\
              ALTER TABLE traces ADD COLUMN app_id VARCHAR;\
+             ALTER TABLE traces ADD COLUMN agent_id VARCHAR;\
+             ALTER TABLE traces ADD COLUMN agent_name VARCHAR;\
+             ALTER TABLE traces ADD COLUMN session_id VARCHAR;\
              ALTER TABLE traces ADD COLUMN end_timestamp TIMESTAMP_NS;\
              ALTER TABLE traces ADD COLUMN attributes JSON;\
              ALTER TABLE traces ADD COLUMN resource_attributes JSON;\
