@@ -33,6 +33,9 @@ const TEMPO_CLOCK_SKEW_NS: i64 = 5 * 60 * 1_000_000_000;
 const TRACE_SCAN_SQL: &str = include_str!("trace_scan.sql");
 const TRACE_ID_FILTER_SQL: &str = include_str!("trace_id_filter.sql");
 const EXCLUDE_RECORDING_FILTER_SQL: &str = include_str!("exclude_recording_filter.sql");
+const TAG_NAMES_MAP_KEYS_SQL: &str = include_str!("tag_names_map_keys.sql");
+const TAG_EVENT_LINK_ROWS_SQL: &str = include_str!("tag_event_link_rows.sql");
+const TAG_VALUES_SQL: &str = include_str!("tag_values.sql");
 
 /// Inputs for a Tempo lake scan (protocol adapters map request types here).
 #[derive(Debug, Clone, Copy)]
@@ -96,6 +99,50 @@ pub(crate) fn trace_scan_sql(
     trace_id: Option<&str>,
 ) -> Result<TrustedSql, String> {
     let sql = compile_trace_scan_sql(params, trace_id)?;
+    approved_query(sql).map_err(|error| error.to_string())
+}
+
+pub(crate) fn tag_names_map_keys_sql(limit: usize) -> Result<TrustedSql, String> {
+    let (start_ns, end_ns) = resolve_tempo_scan_window(None, None)?;
+    let window = query_window_from_exclusive_ns(start_ns, end_ns)?;
+    let limit = limit.max(1);
+    let sql = window
+        .scan_with_timestamp_filter("", |bound| {
+            TAG_NAMES_MAP_KEYS_SQL
+                .replace("{{timestamp_filter}}", bound)
+                .replace("{{limit}}", &limit.to_string())
+        })
+        .into_sql();
+    approved_query(sql).map_err(|error| error.to_string())
+}
+
+pub(crate) fn tag_event_link_rows_sql(limit: usize) -> Result<TrustedSql, String> {
+    let (start_ns, end_ns) = resolve_tempo_scan_window(None, None)?;
+    let window = query_window_from_exclusive_ns(start_ns, end_ns)?;
+    let limit = limit.max(1);
+    let sql = window
+        .scan_with_timestamp_filter("", |bound| {
+            TAG_EVENT_LINK_ROWS_SQL
+                .replace("{{timestamp_filter}}", bound)
+                .replace("{{limit}}", &limit.to_string())
+        })
+        .into_sql();
+    approved_query(sql).map_err(|error| error.to_string())
+}
+
+pub(crate) fn tag_values_sql(tag: &str, limit: usize) -> Result<TrustedSql, String> {
+    let (start_ns, end_ns) = resolve_tempo_scan_window(None, None)?;
+    let window = query_window_from_exclusive_ns(start_ns, end_ns)?;
+    let limit = limit.max(1);
+    let tag_expr = tag_value_sql(tag);
+    let sql = window
+        .scan_with_timestamp_filter("", |bound| {
+            TAG_VALUES_SQL
+                .replace("{{timestamp_filter}}", bound)
+                .replace("{{tag_expr}}", &tag_expr)
+                .replace("{{limit}}", &limit.to_string())
+        })
+        .into_sql();
     approved_query(sql).map_err(|error| error.to_string())
 }
 

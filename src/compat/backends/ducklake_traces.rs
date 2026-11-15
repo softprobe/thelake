@@ -10,7 +10,10 @@ use crate::compat::projection::tempo::{project_tempo_link_attributes, project_te
 use crate::compat::tempo::traceql::{is_numeric_field, TraceField, TracePredicate, TraceSelector};
 use crate::compat::workspace::CompatWorkspaceContext;
 use crate::query::{QueryEngine, QueryResult};
-use crate::sql::tempo::{scan_reached_cap, trace_scan_cap, trace_scan_sql};
+use crate::sql::tempo::{
+    scan_reached_cap, tag_event_link_rows_sql, tag_names_map_keys_sql, tag_values_sql,
+    trace_scan_cap, trace_scan_sql,
+};
 use crate::sql::trusted::TrustedSql;
 use crate::storage::schema::attribute_map::attribute_map_json_to_string_map;
 use async_trait::async_trait;
@@ -238,6 +241,41 @@ impl DuckLakeTraceBackend {
             }
         }
     }
+
+    async fn event_link_tags(
+        &self,
+        ctx: &CompatWorkspaceContext,
+    ) -> Result<Vec<(String, String)>, CompatError> {
+        let trusted = tag_event_link_rows_sql(ctx.limits.max_series)
+            .map_err(|msg| CompatError::new(CompatErrorCode::BadRequest, msg))?;
+        let result = self.execute(ctx, trusted).await?;
+        if result.rows.is_empty() {
+            return Ok(Vec::new());
+        }
+        let events_col = result.columns.iter().position(|c| c == "events");
+        let links_col = result.columns.iter().position(|c| c == "links");
+        let mut pairs = Vec::new();
+        for (row_index, row) in result.rows.iter().enumerate() {
+            if let Some(value) = optional_cell(row, events_col, row_index, "events")? {
+                for event in parse_events(value, 0, row_index)? {
+                    for attr in event.attributes {
+                        if !attr.key.is_empty() {
+                            pairs.push((attr.key, attr.value));
+                        }
+                    }
+                }
+            }
+            if let Some(value) = optional_cell(row, links_col, row_index, "links")? {
+                let links = parse_links(value, row_index)?;
+                for (key, val) in project_tempo_link_attributes(&links) {
+                    if !key.is_empty() {
+                        pairs.push((key, val));
+                    }
+                }
+            }
+        }
+        Ok(pairs)
+    }
 }
 
 #[async_trait]
@@ -360,21 +398,24 @@ impl TraceQueryBackend for DuckLakeTraceBackend {
     }
 
     async fn search_tags(&self, ctx: &CompatWorkspaceContext) -> Result<Vec<String>, CompatError> {
-        let request = TraceSearchRequest {
-            tags: BTreeMap::new(),
-            selector: None,
-            min_duration_ns: None,
-            max_duration_ns: None,
-            start_ns: None,
-            end_ns: None,
-            limit: ctx.limits.max_series,
-        };
-        let spans = self.scan(ctx, &request, None).await?;
+        let trusted = tag_names_map_keys_sql(ctx.limits.max_series)
+            .map_err(|msg| CompatError::new(CompatErrorCode::BadRequest, msg))?;
+        let result = self.execute(ctx, trusted).await?;
         let mut names = BTreeSet::new();
-        for span in spans {
-            names.extend(self.tags_for(&span, usize::MAX).into_keys());
+        for row in &result.rows {
+            if let Some(key) = row.first().and_then(cell_string) {
+                if !key.is_empty()
+                    && key != crate::models::span::INSTRUMENTATION_SCOPE_ATTRIBUTE
+                    && key != crate::models::span::LINKS_ATTRIBUTE
+                {
+                    names.insert(key);
+                }
+            }
         }
-        Ok(names.into_iter().collect())
+        for (key, _) in self.event_link_tags(ctx).await? {
+            names.insert(key);
+        }
+        Ok(names.into_iter().take(ctx.limits.max_series).collect())
     }
 
     async fn search_tag_values(
@@ -382,23 +423,21 @@ impl TraceQueryBackend for DuckLakeTraceBackend {
         ctx: &CompatWorkspaceContext,
         tag: &str,
     ) -> Result<Vec<String>, CompatError> {
-        let request = TraceSearchRequest {
-            tags: BTreeMap::new(),
-            selector: None,
-            min_duration_ns: None,
-            max_duration_ns: None,
-            start_ns: None,
-            end_ns: None,
-            limit: ctx.limits.max_series,
-        };
-        let spans = self.scan(ctx, &request, None).await?;
+        let trusted = tag_values_sql(tag, ctx.limits.max_series)
+            .map_err(|msg| CompatError::new(CompatErrorCode::BadRequest, msg))?;
+        let result = self.execute(ctx, trusted).await?;
         let mut values = BTreeSet::new();
-        for span in spans {
-            if let Some(value) = self.tags_for(&span, usize::MAX).get(tag) {
-                values.insert(value.clone());
+        for row in &result.rows {
+            if let Some(value) = row.first().and_then(cell_string) {
+                values.insert(value);
             }
         }
-        Ok(values.into_iter().collect())
+        for (key, value) in self.event_link_tags(ctx).await? {
+            if key == tag {
+                values.insert(value);
+            }
+        }
+        Ok(values.into_iter().take(ctx.limits.max_series).collect())
     }
 }
 

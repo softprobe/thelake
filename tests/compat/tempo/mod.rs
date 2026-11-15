@@ -1388,3 +1388,87 @@ async fn tempo_query_differential_vs_pinned_tempo() {
         );
     }
 }
+
+#[tokio::test]
+async fn tempo_query_traceql_unscoped_leading_dot_attributes_match_across_scopes() {
+    let mut records = fixture().records;
+    let mut matching = records[0].clone();
+    matching.trace_id = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into();
+    matching.span_id = "bbbbbbbbbbbbbbbb".into();
+    matching.parent_span_id = None;
+    matching.resource.insert(
+        "gen_ai.conversation.id".into(),
+        "ses_99b9e24c-329b-4421-8d8c-1faf7ca121c8".into(),
+    );
+    matching
+        .attributes
+        .insert("http.request.method".into(), "POST".into());
+    records.push(matching);
+
+    let (router, _state, _temp) = build_seeded_tempo_router(&records).await;
+    let (status, body) = query_path_with_scope(
+        &router,
+        "/api/search?q=%7B+.gen_ai.conversation.id+%3D+%22ses_99b9e24c-329b-4421-8d8c-1faf7ca121c8%22+%26%26+.http.request.method+%3D+%22POST%22+%7D&start=1699900000&end=1700100000&limit=60",
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body={body}");
+    let traces = body["traces"].as_array().expect("traces array");
+    assert_eq!(traces.len(), 1);
+    assert_eq!(traces[0]["traceID"], "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+}
+
+#[tokio::test]
+async fn tempo_query_search_tags_and_values_succeed_above_100k_spans() {
+    let template = fixture().records.into_iter().next().expect("seed record");
+    let (router, state, _temp) = build_seeded_tempo_router(&[]).await;
+
+    let mut batch = Vec::with_capacity(4_005);
+    for batch_idx in 0..25 {
+        batch.clear();
+        for item_idx in 0..4_001 {
+            let id = batch_idx * 4_001 + item_idx;
+            let mut record = template.clone();
+            record.trace_id = format!("{id:032x}");
+            record.span_id = format!("{id:016x}");
+            record.parent_span_id = None;
+            record.events.clear();
+            record.links.clear();
+            record.attributes.clear();
+            record.attributes.insert(
+                "http.request.method".into(),
+                if id % 2 == 0 { "POST" } else { "GET" }.into(),
+            );
+            batch.push(record);
+        }
+        ingest_records(&router, &batch, None).await;
+    }
+    flush_traces(&state, crate::util::workspace::LOCAL_WORKSPACE_ID).await;
+
+    let (status, tags_body) = query_path_with_scope(&router, "/api/search/tags", None, None).await;
+    assert_eq!(status, StatusCode::OK, "tags_body={tags_body}");
+    let tag_names = tags_body["tagNames"].as_array().expect("tagNames array");
+    assert!(
+        tag_names.iter().any(|v| v == "http.request.method"),
+        "expected http.request.method in {tag_names:?}"
+    );
+    assert!(
+        tag_names.iter().any(|v| v == "service.name"),
+        "expected service.name in {tag_names:?}"
+    );
+
+    let (status, values_body) = query_path_with_scope(
+        &router,
+        "/api/search/tag/http.request.method/values",
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "values_body={values_body}");
+    let tag_values = values_body["tagValues"]
+        .as_array()
+        .expect("tagValues array");
+    assert!(tag_values.iter().any(|v| v == "POST"));
+    assert!(tag_values.iter().any(|v| v == "GET"));
+}
