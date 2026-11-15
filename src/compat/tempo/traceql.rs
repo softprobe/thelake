@@ -2,6 +2,7 @@ use crate::compat::errors::CompatError;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TraceSelector {
+    All,
     Predicate(TracePredicate),
     And(Box<TraceSelector>, Box<TraceSelector>),
     Or(Box<TraceSelector>, Box<TraceSelector>),
@@ -9,11 +10,11 @@ pub enum TraceSelector {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TraceField {
+    Unscoped(String),
     Span(String),
     Resource(String),
     Instrumentation(String),
     Intrinsic(String),
-    Unscoped(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -84,6 +85,10 @@ impl<'a> Parser<'a> {
         self.skip_ws();
         if !self.take(b'{') {
             return Err(bad("TraceQL selector must start with '{'"));
+        }
+        self.skip_ws();
+        if self.take(b'}') {
+            return Ok(TraceSelector::All);
         }
         let expression = self.parse_or()?;
         self.skip_ws();
@@ -162,6 +167,12 @@ impl<'a> Parser<'a> {
         if raw.is_empty() {
             return Err(bad("TraceQL field is required"));
         }
+        if let Some(field) = raw.strip_prefix('.') {
+            if field.is_empty() {
+                return Err(bad("TraceQL unscoped attribute name is required"));
+            }
+            return Ok(TraceField::Unscoped(field.to_string()));
+        }
         if let Some(field) = raw.strip_prefix("span.") {
             return Ok(TraceField::Span(field.to_string()));
         }
@@ -181,12 +192,6 @@ impl<'a> Parser<'a> {
         }
         if raw.starts_with("event.") || raw.starts_with("link.") {
             return Err(unsupported(format!("TraceQL field '{raw}' is unsupported")));
-        }
-        if let Some(field) = raw.strip_prefix('.') {
-            if field.is_empty() {
-                return Err(bad("TraceQL field is required"));
-            }
-            return Ok(TraceField::Unscoped(field.to_string()));
         }
         if matches!(
             raw.as_str(),
@@ -391,7 +396,9 @@ fn validate_predicate_types(predicate: &TracePredicate) -> Result<(), CompatErro
 
 pub fn is_status_field(field: &TraceField) -> bool {
     match field {
-        TraceField::Span(key) => matches!(key.as_str(), "status" | "status_code"),
+        TraceField::Span(key) | TraceField::Unscoped(key) => {
+            matches!(key.as_str(), "status" | "status_code")
+        }
         TraceField::Intrinsic(key) => matches!(
             key.as_str(),
             "status"
@@ -401,7 +408,7 @@ pub fn is_status_field(field: &TraceField) -> bool {
                 | "span:status_code"
                 | "span.status_code"
         ),
-        TraceField::Resource(_) | TraceField::Instrumentation(_) | TraceField::Unscoped(_) => false,
+        TraceField::Resource(_) | TraceField::Instrumentation(_) => false,
     }
 }
 
@@ -570,7 +577,14 @@ mod tests {
     }
 
     #[test]
-    fn parses_unscoped_leading_dot_attributes() {
+    fn parses_empty_selector_and_unscoped_dot_attributes() {
+        parse_traceql("{}").expect("empty TraceQL selector");
+        parse_traceql("{   }").expect("whitespace-only TraceQL selector");
+        parse_traceql(
+            r#"{ .http.request.method = "POST" && .http.response.status_code >= 500 && .sp.session.id =~ ".+" }"#,
+        )
+        .expect("unscoped dot attributes with string, numeric, and regex");
+        parse_traceql(r#"{ .sp.session.id !~ ".+" }"#).expect("unscoped negative regex");
         parse_traceql(
             r#"{ .gen_ai.conversation.id = "ses_99b9e24c-329b-4421-8d8c-1faf7ca121c8" && .http.request.method = "POST" }"#,
         )

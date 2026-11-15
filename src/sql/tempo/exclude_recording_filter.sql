@@ -1,0 +1,1 @@
+ AND COALESCE(observation_type, '') <> 'recording'

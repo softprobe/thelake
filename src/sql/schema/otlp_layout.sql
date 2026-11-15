@@ -2,7 +2,7 @@
 -- the one-off export tool. Consumers execute this file and read the variables;
 -- do not copy these values into another writer path.
 SET VARIABLE thelake_otlp_partition_by = 'year(timestamp), month(timestamp), day(timestamp)';
-SET VARIABLE thelake_otlp_sorted_by = 'session_id, trace_id, timestamp';
+SET VARIABLE thelake_otlp_sorted_by = 'session_id, timestamp, trace_id';
 SET VARIABLE thelake_otlp_row_group_size_bytes = 8388608;
 SET VARIABLE thelake_otlp_target_file_size_bytes = 134217728;
 SET VARIABLE thelake_otlp_parquet_compression = 'zstd';

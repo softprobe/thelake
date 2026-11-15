@@ -5,9 +5,9 @@ This guide shows how to instrument your application to capture HTTP bodies and b
 ## Session wording (read this first)
 
 - **`sp.session.id` on spans** is the **correlation id** stored in the DuckLake
-  `session_id` column (it defaults to `trace_id` if unset). Typical production
-  use: **end-user session**, checkout flow, or any stable id you want to query
-  by.
+  `session_id` column (empty string `""` on disk and `null` on API read when
+  unset). Typical production use: **end-user session**, checkout flow, or any
+  stable id you want to query by.
 
 If documentation mentions “session”, it means **`sp.session.id` /
 `session_id`** (telemetry correlation). Capture and replay controls belong to
@@ -405,7 +405,8 @@ span.addEvent('http.request', {
 // ✅ GOOD: Explicit session tracking
 span.setAttribute('sp.session.id', sessionId);
 
-// If no sp.session.id is set, trace_id is used as grouping key
+// If no sp.session.id is set, the trace remains unassigned (session_id: null)
+// and is still queryable by trace_id or Tempo TraceQL.
 ```
 
 ## Web session recording (rrweb)

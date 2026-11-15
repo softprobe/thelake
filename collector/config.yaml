@@ -1,0 +1,57 @@
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+  softprobe_auth: {}
+
+receivers:
+  otlp:
+    protocols:
+      http:
+        endpoint: 0.0.0.0:4318
+        traces_url_path: /v1/traces
+        include_metadata: true
+        max_request_body_size: 104857600
+        cors:
+          allowed_origins: ["*"]
+          allowed_headers: ["*"]
+          max_age: 86400
+
+processors:
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 512
+    spike_limit_mib: 128
+  sessioncorrelation:
+    assertion_hmac_secret: ${env:SOFTPROBE_ASSERTION_HMAC_SECRET}
+    pending_window: ${env:THELAKE_CORRELATION_PENDING_WINDOW:-2s}
+    resolved_ttl: 10m
+    shard_count: 64
+    max_resolved_traces_per_scope: 4096
+    max_resolved_traces_global: 65536
+    max_pending_spans_per_scope: 4096
+    max_pending_spans_global: 32768
+    max_pending_spans_per_trace: 256
+
+exporters:
+  otlphttp/thelake:
+    traces_endpoint: ${env:THELAKE_UPSTREAM_URL}/v1/traces
+    encoding: proto
+    compression: gzip
+    timeout: 30s
+    auth:
+      authenticator: softprobe_auth
+    sending_queue:
+      enabled: false
+    retry_on_failure:
+      enabled: true
+      initial_interval: 200ms
+      max_interval: 2s
+      max_elapsed_time: 10s
+
+service:
+  extensions: [health_check, softprobe_auth]
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, sessioncorrelation]
+      exporters: [otlphttp/thelake]

@@ -3,7 +3,7 @@
 use super::traces::{
     persisted_status_code_numeric_value, visible_span_attributes, TraceAttribute, TraceData,
     TraceEvent, TraceLookupBounds, TraceQueryBackend, TraceSearchHit, TraceSearchRequest,
-    TraceSpan,
+    TraceServiceStats, TraceSpan, TraceSpanSet, TraceSpanSummary,
 };
 use crate::compat::errors::{CompatError, CompatErrorCode};
 use crate::compat::projection::tempo::{project_tempo_link_attributes, project_tempo_tags};
@@ -126,6 +126,7 @@ impl DuckLakeTraceBackend {
 
     fn matches_selector(selector: &TraceSelector, span: &TraceSpan) -> bool {
         match selector {
+            TraceSelector::All => true,
             TraceSelector::Predicate(predicate) => Self::matches_predicate(predicate, span),
             TraceSelector::And(left, right) => {
                 Self::matches_selector(left, span) && Self::matches_selector(right, span)
@@ -296,10 +297,9 @@ impl TraceQueryBackend for DuckLakeTraceBackend {
         };
         let spans = self.scan(ctx, &request, Some(trace_id)).await?;
         if spans.is_empty() {
-            Ok(None)
-        } else {
-            Ok(Some(TraceData { spans }))
+            return Ok(None);
         }
+        Ok(Some(TraceData { spans }))
     }
 
     async fn search(
@@ -318,15 +318,18 @@ impl TraceQueryBackend for DuckLakeTraceBackend {
 
         let mut hits = Vec::new();
         for (trace_id, spans) in by_trace {
-            let matching = spans.iter().any(|span| {
-                self.matches_tags(span, &request)
-                    && request
-                        .selector
-                        .as_ref()
-                        .map(|selector| Self::matches_selector(selector, span))
-                        .unwrap_or(true)
-            });
-            if !matching {
+            let matched_spans = spans
+                .iter()
+                .filter(|span| {
+                    self.matches_tags(span, &request)
+                        && request
+                            .selector
+                            .as_ref()
+                            .map(|selector| Self::matches_selector(selector, span))
+                            .unwrap_or(true)
+                })
+                .collect::<Vec<_>>();
+            if matched_spans.is_empty() {
                 continue;
             }
             let start = spans
@@ -345,24 +348,52 @@ impl TraceQueryBackend for DuckLakeTraceBackend {
             {
                 continue;
             }
+            let span_ids = spans
+                .iter()
+                .map(|span| span.span_id.as_str())
+                .collect::<BTreeSet<_>>();
             let root = spans
                 .iter()
                 .find(|span| span.parent_span_id.is_none())
+                .or_else(|| {
+                    spans.iter().find(|span| {
+                        span.parent_span_id
+                            .as_deref()
+                            .is_some_and(|pid| !span_ids.contains(pid))
+                    })
+                })
                 .or_else(|| spans.first());
+            let orphan_parent = root.and_then(|span| {
+                span.parent_span_id
+                    .as_deref()
+                    .filter(|pid| !span_ids.contains(*pid))
+            });
+            let service_stats = summarize_service_stats(&spans);
+            let span_set = build_span_set(&matched_spans, root, orphan_parent);
             hits.push(TraceSearchHit {
                 trace_id,
                 root_service_name: root.and_then(|span| span.service_name.clone()),
                 root_trace_name: root.map(|span| span.name.clone()),
                 start_time_unix_nano: start,
                 duration_ms: duration / 1_000_000,
+                service_stats,
+                span_set,
             });
+        }
+        if hits.len() > request.limit {
+            hits.sort_by(|left, right| {
+                right
+                    .start_time_unix_nano
+                    .cmp(&left.start_time_unix_nano)
+                    .then_with(|| right.trace_id.cmp(&left.trace_id))
+            });
+            hits.truncate(request.limit);
         }
         hits.sort_by(|left, right| {
             left.start_time_unix_nano
                 .cmp(&right.start_time_unix_nano)
                 .then_with(|| left.trace_id.cmp(&right.trace_id))
         });
-        hits.truncate(request.limit);
         Ok(hits)
     }
 
@@ -454,6 +485,10 @@ fn parse_rows(result: &QueryResult) -> Result<Vec<TraceSpan>, CompatError> {
             "trace query result is missing required columns",
         ));
     };
+    let agent_id_col = index("agent_id");
+    let agent_name_col = index("agent_name");
+    let session_id_col = index("session_id");
+    let session_attr_col = index("session_attr_id");
 
     result
         .rows
@@ -465,30 +500,69 @@ fn parse_rows(result: &QueryResult) -> Result<Vec<TraceSpan>, CompatError> {
             let name = required_string(row, name, row_index, "message_type")?;
             let start_time_unix_nano = required_i64(row, start, row_index, "start_time_unix_nano")?;
             let end_time_unix_nano = optional_i64(row, end, row_index, "end_timestamp")?;
-            let attributes = optional_cell(row, attributes, row_index, "attributes")?
+            let mut attributes = optional_cell(row, attributes, row_index, "attributes")?
                 .map(|value| parse_attributes(value, row_index, "attributes"))
                 .transpose()?
                 .unwrap_or_default();
+            let mut resource_attributes =
+                optional_cell(row, resource_attributes, row_index, "resource_attributes")?
+                    .map(|value| parse_attributes(value, row_index, "resource_attributes"))
+                    .transpose()?
+                    .unwrap_or_default();
+            let row_agent_id = agent_id_col
+                .and_then(|idx| row.get(idx))
+                .and_then(cell_string)
+                .filter(|v| !v.is_empty());
+            let row_session_id = session_id_col
+                .and_then(|idx| row.get(idx))
+                .and_then(cell_string)
+                .unwrap_or_default();
+            if let Some(aid) = row_agent_id {
+                if !resource_attributes.iter().any(|a| a.key == "sp.agent.id") {
+                    resource_attributes.push(TraceAttribute {
+                        key: "sp.agent.id".into(),
+                        value: aid,
+                    });
+                }
+                if let Some(aname) = agent_name_col
+                    .and_then(|idx| row.get(idx))
+                    .and_then(cell_string)
+                    .filter(|v| !v.is_empty())
+                {
+                    if !resource_attributes.iter().any(|a| a.key == "sp.agent.name") {
+                        resource_attributes.push(TraceAttribute {
+                            key: "sp.agent.name".into(),
+                            value: aname,
+                        });
+                    }
+                }
+                resource_attributes.sort_by(|left, right| left.key.cmp(&right.key));
+
+                let stored_session = (!row_session_id.is_empty())
+                    .then_some(row_session_id)
+                    .or_else(|| {
+                        session_attr_col
+                            .and_then(|idx| row.get(idx))
+                            .and_then(cell_string)
+                            .filter(|v| !v.is_empty())
+                    });
+                if let Some(sid) = stored_session {
+                    upsert_attribute(&mut attributes, "sp.session.id", sid);
+                }
+            }
             Ok(TraceSpan {
                 trace_id,
                 span_id,
                 parent_span_id: parent_span_id
                     .and_then(|idx| row.get(idx))
-                    .and_then(cell_string),
+                    .and_then(cell_string)
+                    .filter(|v| !v.is_empty()),
                 name,
                 kind: kind.and_then(|idx| row.get(idx)).and_then(cell_string),
                 start_time_unix_nano,
                 end_time_unix_nano,
                 attributes,
-                resource_attributes: optional_cell(
-                    row,
-                    resource_attributes,
-                    row_index,
-                    "resource_attributes",
-                )?
-                .map(|value| parse_attributes(value, row_index, "resource_attributes"))
-                .transpose()?
-                .unwrap_or_default(),
+                resource_attributes,
                 instrumentation_scope: optional_cell(
                     row,
                     instrumentation_scope,
@@ -658,16 +732,207 @@ fn strict_json_value(value: &Value, row_index: usize, field: &str) -> Result<Val
     }
 }
 
-fn field_value(field: &TraceField, span: &TraceSpan) -> Option<String> {
-    match field {
-        TraceField::Span(key) if key == "status_code" || key == "status" => {
-            span_status_code_value(span)
-        }
-        TraceField::Span(key) => span
+fn upsert_attribute(attributes: &mut Vec<TraceAttribute>, key: &str, value: String) {
+    if let Some(existing) = attributes.iter_mut().find(|a| a.key == key) {
+        existing.value = value;
+    } else {
+        attributes.push(TraceAttribute {
+            key: key.to_string(),
+            value,
+        });
+        attributes.sort_by(|left, right| left.key.cmp(&right.key));
+    }
+}
+
+fn is_http_body_helper(span: &TraceSpan) -> bool {
+    span.name == "softprobe.http.body.capture"
+        || span
             .attributes
             .iter()
-            .find(|attribute| attribute.key == *key)
-            .map(|attribute| attribute.value.clone()),
+            .any(|a| a.key == "sp.observation.type" && a.value == "http_body")
+}
+
+fn is_error_span(span: &TraceSpan) -> bool {
+    span.status_code
+        .as_deref()
+        .and_then(persisted_status_code_numeric_value)
+        == Some(2)
+        || span.attributes.iter().any(|a| {
+            matches!(
+                a.key.as_str(),
+                "http.response.status_code" | "http.status_code"
+            ) && a.value.parse::<i64>().is_ok_and(|code| code >= 500)
+        })
+}
+
+fn summarize_service_stats(spans: &[TraceSpan]) -> BTreeMap<String, TraceServiceStats> {
+    let non_helper = spans
+        .iter()
+        .filter(|span| !is_http_body_helper(span))
+        .collect::<Vec<_>>();
+    let source = if non_helper.is_empty() {
+        spans.iter().collect::<Vec<_>>()
+    } else {
+        non_helper
+    };
+    let mut stats = BTreeMap::<String, TraceServiceStats>::new();
+    for span in source {
+        let service = span
+            .service_name
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .unwrap_or("unknown");
+        let entry = stats.entry(service.to_string()).or_default();
+        entry.span_count += 1;
+        if is_error_span(span) {
+            entry.error_count += 1;
+        }
+    }
+    stats
+}
+
+fn build_span_set(
+    matched_spans: &[&TraceSpan],
+    root: Option<&TraceSpan>,
+    orphan_parent: Option<&str>,
+) -> TraceSpanSet {
+    let non_helper_matched = matched_spans
+        .iter()
+        .copied()
+        .filter(|span| !is_http_body_helper(span))
+        .collect::<Vec<_>>();
+    let candidates = if non_helper_matched.is_empty() {
+        matched_spans.to_vec()
+    } else {
+        non_helper_matched
+    };
+    let matched = candidates.len();
+    let mut chosen: Vec<&TraceSpan> = Vec::with_capacity(3);
+    if let Some(root_span) = root {
+        chosen.push(root_span);
+    }
+    for span in candidates.iter().copied().filter(|s| is_error_span(s)) {
+        if chosen.len() >= 3 {
+            break;
+        }
+        if !chosen
+            .iter()
+            .any(|existing| existing.span_id == span.span_id)
+        {
+            chosen.push(span);
+        }
+    }
+    for span in &candidates {
+        if chosen.len() >= 3 {
+            break;
+        }
+        if !chosen
+            .iter()
+            .any(|existing| existing.span_id == span.span_id)
+        {
+            chosen.push(span);
+        }
+    }
+    let summaries = chosen
+        .into_iter()
+        .map(|span| {
+            let is_root = root.is_some_and(|r| r.span_id == span.span_id);
+            let mut attrs = BTreeMap::<String, String>::new();
+            if let Some(svc) = span.service_name.as_deref().filter(|s| !s.is_empty()) {
+                attrs.insert("service.name".into(), svc.to_string());
+            }
+            for attr in &span.resource_attributes {
+                if is_summary_safe_attribute(&attr.key, &attr.value) {
+                    attrs.insert(attr.key.clone(), attr.value.clone());
+                }
+            }
+            for attr in visible_span_attributes(span) {
+                if is_summary_safe_attribute(&attr.key, &attr.value) {
+                    attrs.insert(attr.key, attr.value);
+                }
+            }
+            if is_root {
+                if let Some(pid) = orphan_parent {
+                    attrs.insert("sp.orphan_parent_span_id".into(), pid.to_string());
+                }
+            }
+            TraceSpanSummary {
+                span_id: span.span_id.clone(),
+                name: span.name.clone(),
+                start_time_unix_nano: span.start_time_unix_nano,
+                duration_nanos: span
+                    .end_time_unix_nano
+                    .unwrap_or(span.start_time_unix_nano)
+                    .saturating_sub(span.start_time_unix_nano),
+                attributes: attrs
+                    .into_iter()
+                    .map(|(key, value)| TraceAttribute { key, value })
+                    .collect(),
+            }
+        })
+        .collect();
+    TraceSpanSet {
+        spans: summaries,
+        matched,
+    }
+}
+
+fn is_summary_safe_attribute(key: &str, value: &str) -> bool {
+    value.len() <= 256
+        && !matches!(
+            key,
+            "http.request.body.content"
+                | "http.response.body.content"
+                | "http.request_body"
+                | "http.response_body"
+                | "gen_ai.input.messages"
+                | "gen_ai.output.messages"
+                | "sp.rrweb.events"
+        )
+}
+
+fn span_or_session_attr(span: &TraceSpan, key: &str) -> Option<String> {
+    span.attributes
+        .iter()
+        .find(|attribute| attribute.key == key)
+        .map(|attribute| attribute.value.clone())
+        .or_else(|| {
+            if key == "session.id" {
+                span.attributes
+                    .iter()
+                    .find(|attribute| attribute.key == "sp.session.id")
+                    .map(|attribute| attribute.value.clone())
+            } else if key == "sp.session.id" {
+                span.attributes
+                    .iter()
+                    .find(|attribute| attribute.key == "session.id")
+                    .map(|attribute| attribute.value.clone())
+            } else {
+                None
+            }
+        })
+}
+
+fn field_value(field: &TraceField, span: &TraceSpan) -> Option<String> {
+    match field {
+        TraceField::Span(key) | TraceField::Unscoped(key)
+            if key == "status_code" || key == "status" =>
+        {
+            span_status_code_value(span)
+        }
+        TraceField::Span(key) => span_or_session_attr(span, key),
+        TraceField::Unscoped(key) => span_or_session_attr(span, key)
+            .or_else(|| {
+                span.resource_attributes
+                    .iter()
+                    .find(|attribute| attribute.key == *key)
+                    .map(|attribute| attribute.value.clone())
+            })
+            .or_else(|| {
+                (key == "service.name")
+                    .then(|| span.service_name.clone())
+                    .flatten()
+            }),
         TraceField::Resource(key) => span
             .resource_attributes
             .iter()
@@ -681,22 +946,6 @@ fn field_value(field: &TraceField, span: &TraceSpan) -> Option<String> {
         TraceField::Instrumentation(key) => {
             instrumentation_scope_value(span.instrumentation_scope.as_ref(), key)
         }
-        TraceField::Unscoped(key) => span
-            .attributes
-            .iter()
-            .find(|attribute| attribute.key == *key)
-            .map(|attribute| attribute.value.clone())
-            .or_else(|| {
-                span.resource_attributes
-                    .iter()
-                    .find(|attribute| attribute.key == *key)
-                    .map(|attribute| attribute.value.clone())
-                    .or_else(|| {
-                        (key == "service.name")
-                            .then(|| span.service_name.clone())
-                            .flatten()
-                    })
-            }),
         TraceField::Intrinsic(key) => match key.as_str() {
             "name" | "span:name" | "span.name" => Some(span.name.clone()),
             "kind" | "span:kind" | "span.kind" => span.kind.clone(),

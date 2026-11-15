@@ -62,6 +62,27 @@ pub(crate) fn persisted_status_code_numeric_value(value: &str) -> Option<i64> {
     crate::compat::tempo::traceql::canonical_status_code(value)
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TraceServiceStats {
+    pub span_count: usize,
+    pub error_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TraceSpanSummary {
+    pub span_id: String,
+    pub name: String,
+    pub start_time_unix_nano: i64,
+    pub duration_nanos: i64,
+    pub attributes: Vec<TraceAttribute>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TraceSpanSet {
+    pub spans: Vec<TraceSpanSummary>,
+    pub matched: usize,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct TraceSearchHit {
     pub trace_id: String,
@@ -69,6 +90,8 @@ pub struct TraceSearchHit {
     pub root_trace_name: Option<String>,
     pub start_time_unix_nano: i64,
     pub duration_ms: i64,
+    pub service_stats: BTreeMap<String, TraceServiceStats>,
+    pub span_set: TraceSpanSet,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

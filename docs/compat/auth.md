@@ -45,10 +45,11 @@ the [cross-repo design and verification map](../../../sp-llm/docs/specs/agent-ap
 Opaque Agent `spk_…` keys are resolved by Explorer's HTTP gateway. Direct
 TheLake OTLP/gRPC does not accept that key or carry its Agent capability
 assertion; Agent capture exporters must use the Explorer HTTP ingest path until
-equivalent gRPC enforcement is implemented. For browser and OBI session capture,
-TheLake joins on the trusted `(workspace_id, agent_id)` assertion scope and
-`trace_id`. The browser span supplies `session.id`. No capture ID is needed or
-accepted as an authorization claim.
+equivalent gRPC enforcement is implemented. TheLake persists each batch
+statelessly without cross-span session correlation; out-of-order browser and OBI
+spans are correlated externally in `thelake-collector` within the verified
+`(workspace_id, agent_id)` assertion scope before reaching TheLake. No capture
+ID is needed or accepted as an authorization claim.
 
 ### Bearer API key
 

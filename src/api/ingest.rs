@@ -81,6 +81,11 @@ pub async fn ingest_traces(
                     })
                     .into_response(),
                     Err(e) => {
+                        if let Some(val_err) =
+                            e.downcast_ref::<crate::models::span::SpanValidationError>()
+                        {
+                            return (StatusCode::BAD_REQUEST, val_err.to_string()).into_response();
+                        }
                         error!("Failed to process OTLP traces: {}", e);
                         ingest_write_failed(format!("Ingestion failed: {}", e))
                     }
@@ -105,6 +110,11 @@ pub async fn ingest_traces(
                     })
                     .into_response(),
                     Err(e) => {
+                        if let Some(val_err) =
+                            e.downcast_ref::<crate::models::span::SpanValidationError>()
+                        {
+                            return (StatusCode::BAD_REQUEST, val_err.to_string()).into_response();
+                        }
                         error!("Failed to process OTLP traces: {}", e);
                         ingest_write_failed(format!("Ingestion failed: {}", e))
                     }
@@ -277,22 +287,13 @@ async fn process_traces_inner(
         }
     }
 
-    crate::capture_correlation::validate_capture_batch(&spans, &tid, agent_id.as_deref())?;
-    let uses_capture_correlation =
-        crate::capture_correlation::uses_capture_correlation(&spans, agent_id.as_deref());
+    crate::models::span::validate_and_normalize_ingest_batch(&mut spans)?;
 
     let span_count = spans.len();
 
     let ws = state.workspace_for_id(&tid).await?;
     let write_start = std::time::Instant::now();
-    if uses_capture_correlation {
-        let agent_id = agent_id.as_deref().ok_or_else(|| {
-            anyhow::anyhow!("Agent telemetry correlation requires a trusted Agent")
-        })?;
-        ws.ingest_capture_spans(spans, body_size, agent_id).await?;
-    } else {
-        ws.ingest().add_spans(spans, body_size).await?;
-    }
+    ws.ingest().add_spans(spans, body_size).await?;
     if crate::self_monitoring::instrument_customer_workspace(&tid) {
         crate::self_monitoring::record_write(&tid, "traces", app.as_deref(), write_start.elapsed());
     }

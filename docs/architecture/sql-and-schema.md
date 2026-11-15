@@ -44,9 +44,9 @@ Every DuckLake fact table has **`timestamp`** as its only time column. Partition
 
 | Table | Timestamp type | Sort |
 |-------|---------------|------|
-| `traces` | `TIMESTAMP_NS` | `session_id, trace_id, timestamp` |
-| `logs` | `TIMESTAMP_NS` | `session_id, trace_id, timestamp` |
-| `scores` | `TIMESTAMP_NS` | `session_id, trace_id, timestamp` |
+| `traces` | `TIMESTAMP_NS` | `session_id, timestamp, trace_id` |
+| `logs` | `TIMESTAMP_NS` | `session_id, timestamp, trace_id` |
+| `scores` | `TIMESTAMP_NS` | `session_id, timestamp, trace_id` |
 
 Score deduplication identity is `(score_id, timestamp)` in isolated scope and
 `(workspace_id, score_id, timestamp)` in shared scope. A repeated `score_id` at a

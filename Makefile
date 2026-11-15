@@ -19,9 +19,9 @@
 SHELL := /bin/bash
 
 .PHONY: help ensure-cache doctor setup teardown check-infra explorer-deps explorer-assets run \
-	clean clean-cache build build-release package publish test-publish-tags \
-	contracts-test lint check-no-subrepo-skills check-sql-guardrails fmt check-fmt \
-	test test-e2e test-perf ci release _release test-loki-diff test-tempo-diff \
+	clean clean-cache build build-release build-collector package package-collector publish publish-collector test-publish-tags \
+	contracts-test lint lint-collector check-no-subrepo-skills check-sql-guardrails fmt check-fmt \
+	test test-collector test-e2e test-perf ci release _release test-loki-diff test-tempo-diff \
 	check-compat-reference-pins check-grafana-reference-pin \
 	compat-reference-image compat-reference-version compat-builder-image grafana-reference-version grafana-reference-image grafana-reference-digest \
 	ducklake-extension \
@@ -134,6 +134,9 @@ GRAFANA_SYSTEM_TIMEOUT_SECS ?= 900
 
 IMAGE ?= softprobe/thelake
 CACHE_REF ?= $(IMAGE):buildcache
+COLLECTOR_DIR := $(CURDIR)/collector
+COLLECTOR_IMAGE ?= softprobe/thelake-collector
+COLLECTOR_CACHE_REF ?= $(COLLECTOR_IMAGE):buildcache
 FALLBACK_BUILDER_NAME ?= thelake-builder
 DIST_DIR ?= dist
 E2E_BACKEND ?= local
@@ -168,7 +171,7 @@ ensure-cache:
 doctor: ensure-cache
 	@set -e; \
 	missing=0; \
-	for c in cargo rustc docker curl rg clang; do \
+	for c in cargo rustc go docker curl rg clang; do \
 		if ! command -v $$c >/dev/null 2>&1; then echo "missing: $$c"; missing=1; fi; \
 	done; \
 	if ! command -v mold >/dev/null 2>&1; then echo "warning: mold not found (linux link may fail)"; fi; \
@@ -256,6 +259,12 @@ _ensure-dist:
 package: _ensure-dist
 	docker build --platform linux/amd64 -t softprobe/thelake:local .
 
+build-collector: ensure-cache
+	cd "$(COLLECTOR_DIR)" && go build -o "$(CARGO_TARGET_DIR)/thelake-collector" ./cmd/thelake-collector
+
+package-collector:
+	docker build --platform linux/amd64 -t $(COLLECTOR_IMAGE):local "$(COLLECTOR_DIR)"
+
 publish:
 	@set -euo pipefail; \
 	TAG="$(TAG)"; TAG_LATEST="$(TAG_LATEST)"; \
@@ -296,6 +305,45 @@ publish:
 		--cache-to "type=registry,ref=$(CACHE_REF),mode=max" \
 		--push "$${tag_args[@]}" .
 
+publish-collector:
+	@set -euo pipefail; \
+	TAG="$(TAG)"; TAG_LATEST="$(TAG_LATEST)"; \
+	tags="$(COLLECTOR_IMAGE):$$TAG"; \
+	case "$$TAG_LATEST" in 0|false|FALSE|no|NO) ;; *) \
+		if [ "$$TAG" != "latest" ]; then tags=$$(printf '%s\n%s' "$$tags" "$(COLLECTOR_IMAGE):latest"); fi ;; \
+	esac; \
+	if [ "$${PRINT_TAGS:-0}" = "1" ]; then printf '%s\n' "$$tags"; exit 0; fi; \
+	if [ "$${PRINT_BUILDX_ARGS:-0}" = "1" ]; then \
+		printf '%s\n' --builder "$(FALLBACK_BUILDER_NAME)" --platform linux/amd64 \
+			--cache-from "type=registry,ref=$(COLLECTOR_CACHE_REF),ignore-error=true" \
+			--cache-to "type=registry,ref=$(COLLECTOR_CACHE_REF),mode=max" \
+			--push -t "$(COLLECTOR_IMAGE):$$TAG" "$(COLLECTOR_DIR)"; \
+		exit 0; \
+	fi; \
+	name=""; driver=""; \
+	set +e; \
+	name=$$(docker buildx inspect 2>/dev/null | awk '/^Name:/{print $$2; exit}' | tr -d '\r'); \
+	driver=$$(docker buildx inspect 2>/dev/null | awk '/^Driver:/{print $$2; exit}' | tr -d '\r'); \
+	set -e; \
+	builder="$(FALLBACK_BUILDER_NAME)"; \
+	if [ "$$driver" = "docker-container" ] || [ "$$driver" = "kubernetes" ] || [ "$$driver" = "remote" ]; then \
+		builder="$$name"; \
+	elif docker buildx inspect "$(FALLBACK_BUILDER_NAME)" >/dev/null 2>&1; then \
+		builder="$(FALLBACK_BUILDER_NAME)"; docker buildx use "$$builder"; \
+	elif [ "$${CI:-}" = "true" ]; then \
+		echo "error: need docker-container Buildx builder in CI" >&2; exit 1; \
+	else \
+		docker buildx create --name "$(FALLBACK_BUILDER_NAME)" --driver docker-container --use; \
+		builder="$(FALLBACK_BUILDER_NAME)"; \
+	fi; \
+	tag_args=(); \
+	while IFS= read -r t; do [ -n "$$t" ] && tag_args+=(-t "$$t"); done <<< "$$tags"; \
+	echo "publishing (builder=$$builder) → Docker Hub $(COLLECTOR_IMAGE)"; \
+	docker buildx build --builder "$$builder" --platform linux/amd64 \
+		--cache-from "type=registry,ref=$(COLLECTOR_CACHE_REF),ignore-error=true" \
+		--cache-to "type=registry,ref=$(COLLECTOR_CACHE_REF),mode=max" \
+		--push "$${tag_args[@]}" "$(COLLECTOR_DIR)"
+
 test-publish-tags:
 	@set -euo pipefail; \
 	out=$$(PRINT_TAGS=1 TAG_LATEST=0 $(MAKE) --no-print-directory publish TAG=v1.2.3-rc.1); \
@@ -311,6 +359,15 @@ test-publish-tags:
 	echo "$$args" | grep -Fq -- '--builder'; \
 	echo "$$args" | grep -Fq -- '--platform'; \
 	echo "$$args" | grep -Fq -- 'linux/amd64'; \
+	cout=$$(PRINT_TAGS=1 TAG_LATEST=0 $(MAKE) --no-print-directory publish-collector TAG=v1.2.3-rc.1); \
+	echo "$$cout" | grep -qx 'softprobe/thelake-collector:v1.2.3-rc.1'; \
+	! echo "$$cout" | grep -q ':latest$$'; \
+	cout=$$(PRINT_TAGS=1 $(MAKE) --no-print-directory publish-collector TAG=v1.2.3); \
+	echo "$$cout" | grep -qx 'softprobe/thelake-collector:v1.2.3'; \
+	echo "$$cout" | grep -qx 'softprobe/thelake-collector:latest'; \
+	cout=$$(PRINT_TAGS=1 $(MAKE) --no-print-directory publish-collector TAG=latest); \
+	echo "$$cout" | grep -qx 'softprobe/thelake-collector:latest'; \
+	test "$$(echo "$$cout" | wc -l | tr -d ' ')" = "1"; \
 	echo "publish tag plan ok"
 
 check-no-subrepo-skills:
@@ -322,14 +379,19 @@ check-no-subrepo-skills:
 check-sql-guardrails:
 	@python3 scripts/check_sql_guardrails.py ${SQL_GUARDRAIL_BASE:-}
 
-lint: ensure-cache check-no-subrepo-skills check-sql-guardrails
+lint-collector:
+	cd "$(COLLECTOR_DIR)" && test -z "$$(gofmt -l .)" && go vet ./...
+
+lint: ensure-cache check-no-subrepo-skills check-sql-guardrails lint-collector
 	cargo clippy $(CARGO_PROFILE_FLAG) --all-targets -- -D warnings
 
 fmt:
 	cargo fmt
+	cd "$(COLLECTOR_DIR)" && gofmt -w .
 
 check-fmt:
 	cargo fmt -- --check
+	cd "$(COLLECTOR_DIR)" && test -z "$$(gofmt -l .)"
 
 # Workspace artifacts only — does not wipe ~/.cache/thelake (see clean-cache).
 clean:
@@ -391,7 +453,10 @@ _export-minio-aws = \
 ducklake-extension:
 	bash scripts/download-ducklake-extension.sh
 
-test: ensure-cache ducklake-extension explorer-assets
+test-collector:
+	cd "$(COLLECTOR_DIR)" && go test -race -count=1 ./...
+
+test: ensure-cache ducklake-extension explorer-assets test-collector
 	bash tests/scripts/ducklake_extension_download_test.sh
 	@echo "unit + lightweight tests (no e2e infra)..."
 	cargo test $(CARGO_PROFILE_FLAG) --lib --test tests --test compatibility -- --test-threads=1
@@ -739,6 +804,7 @@ _release:
 	echo "PHASE=build-release start"; s=$$(date +%s); $(MAKE) build-release; echo "PHASE=build-release elapsed=$$(($$(date +%s) - $$s))s"; \
 	echo "PHASE=publish start"; s=$$(date +%s); \
 	$(MAKE) publish TAG="$(TAG)" TAG_LATEST="$(TAG_LATEST)"; \
+	$(MAKE) publish-collector TAG="$(TAG)" TAG_LATEST="$(TAG_LATEST)"; \
 	echo "PHASE=publish elapsed=$$(($$(date +%s) - $$s))s"; \
 	total=$$(($$(date +%s) - t0)); \
 	echo "TOTAL=$${total}s goal=$(RELEASE_GOAL_SECS)s (release)"; \

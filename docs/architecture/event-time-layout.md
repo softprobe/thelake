@@ -25,7 +25,7 @@ All three fact tables use the same profile:
 | Property | Value |
 |---|---|
 | Partition expression | `year(timestamp), month(timestamp), day(timestamp)` |
-| Sort order | `(session_id, trace_id, timestamp)` |
+| Sort order | `(session_id, timestamp, trace_id)` |
 | Row-group target | 8 MiB |
 | File target | 128 MiB |
 

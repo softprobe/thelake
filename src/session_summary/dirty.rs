@@ -5,12 +5,79 @@ use crate::workspace::quote_pg_ident;
 use anyhow::{anyhow, Context, Result};
 use chrono::{DateTime, Utc};
 use deadpool_postgres::Pool;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 use tracing::warn;
 
 const DIRTY_UPSERT_SQL: &str = include_str!("../sql/session_summary/dirty_upsert.sql");
 const WORKSPACE_DIRTY_UPSERT_SQL: &str =
     include_str!("../sql/session_summary/dirty_upsert_workspace.sql");
+
+pub const PER_AGENT_DIRTY_HINT_WINDOW: Duration = Duration::from_secs(60);
+pub const PER_AGENT_DIRTY_HINT_MAX_SESSIONS: usize = 1_024;
+const MAX_DIRTY_WINDOW_AGENTS: usize = 4_096;
+
+#[derive(Debug)]
+struct AgentDirtyWindow {
+    window_started_at: Instant,
+    seen_sessions: HashSet<String>,
+}
+
+#[derive(Default)]
+struct DirtyHintLimiter {
+    windows: Mutex<HashMap<String, AgentDirtyWindow>>,
+}
+
+impl DirtyHintLimiter {
+    fn allow_at(&self, span: &Span, now: Instant) -> bool {
+        let sid = span.session_id.trim();
+        if sid.is_empty() {
+            return false;
+        }
+        let Some(agent_id) = span
+            .agent_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+        else {
+            return true;
+        };
+        let mut guard = self.windows.lock().expect("dirty hint limiter lock");
+        if !guard.contains_key(agent_id) && guard.len() >= MAX_DIRTY_WINDOW_AGENTS {
+            guard.retain(|_, win| {
+                now.saturating_duration_since(win.window_started_at) < PER_AGENT_DIRTY_HINT_WINDOW
+            });
+            if guard.len() >= MAX_DIRTY_WINDOW_AGENTS {
+                if let Some(oldest_key) = guard
+                    .iter()
+                    .min_by_key(|(_, win)| win.window_started_at)
+                    .map(|(k, _)| k.clone())
+                {
+                    guard.remove(&oldest_key);
+                }
+            }
+        }
+        let win = guard
+            .entry(agent_id.to_owned())
+            .or_insert_with(|| AgentDirtyWindow {
+                window_started_at: now,
+                seen_sessions: HashSet::new(),
+            });
+        if now.saturating_duration_since(win.window_started_at) >= PER_AGENT_DIRTY_HINT_WINDOW {
+            win.window_started_at = now;
+            win.seen_sessions.clear();
+        }
+        if win.seen_sessions.contains(sid) {
+            return true;
+        }
+        if win.seen_sessions.len() >= PER_AGENT_DIRTY_HINT_MAX_SESSIONS {
+            return false;
+        }
+        win.seen_sessions.insert(sid.to_owned());
+        true
+    }
+}
 
 /// One dirty-queue row hint from a flush batch.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -21,13 +88,15 @@ pub struct DirtyHint {
 }
 
 /// Fold distinct `session_id → {min_ts,max_ts}` from this batch only. No retained state.
-/// Empty `session_id` is skipped (not invented).
 pub fn fold_dirty_hints<'a, I>(spans: I) -> Vec<DirtyHint>
 where
     I: IntoIterator<Item = &'a Span>,
 {
     let mut map: HashMap<String, (DateTime<Utc>, DateTime<Utc>)> = HashMap::new();
     for span in spans {
+        if crate::models::span::is_recording_span(span) {
+            continue;
+        }
         let sid = span.session_id.trim();
         if sid.is_empty() {
             continue;
@@ -63,6 +132,7 @@ pub struct SessionSummaryDirty {
     metadata_schema: String,
     workspace_id: String,
     workspace_scoped: bool,
+    limiter: Arc<DirtyHintLimiter>,
 }
 
 impl SessionSummaryDirty {
@@ -76,6 +146,7 @@ impl SessionSummaryDirty {
             metadata_schema: metadata_schema.into(),
             workspace_id: workspace_id.into(),
             workspace_scoped: false,
+            limiter: Arc::new(DirtyHintLimiter::default()),
         }
     }
 
@@ -89,7 +160,12 @@ impl SessionSummaryDirty {
             metadata_schema: metadata_schema.into(),
             workspace_id: workspace_id.into(),
             workspace_scoped: true,
+            limiter: Arc::new(DirtyHintLimiter::default()),
         }
+    }
+
+    pub fn allow_span(&self, span: &Span) -> bool {
+        self.limiter.allow_at(span, Instant::now())
     }
 
     /// Best-effort: fold + UPSERT. Never fails the caller — logs + metric on error.

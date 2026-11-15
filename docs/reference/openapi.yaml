@@ -668,6 +668,11 @@ paths:
         Uses `TelemetrySearchRequest`: `version`, `scope` (`traces`), required
         nested `timeRange` (`from`/`to`), optional `filter` / `columns` / `sort` /
         `limit` / `cursor`. JSON fields are camelCase.
+        Groups non-recording spans by `trace_id`, surfaces direct or inferred
+        `sessionId` (`null` when unassigned), excludes `http_body` companion
+        spans from `spanCount` and `errorCount`, supports `agent_name`,
+        `agent_id`, `session_id`, and HTTP filters, and supports keyset `cursor`
+        pagination over `(end_time, trace_id)` under default descending sort.
       operationId: searchTraces
       requestBody:
         required: true

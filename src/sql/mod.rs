@@ -4,7 +4,6 @@
 //! Callers outside this package must not embed SQL verbs.
 
 pub mod bounds;
-pub(crate) mod capture_correlation;
 pub mod health;
 pub mod lake_reads;
 pub mod literal;

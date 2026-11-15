@@ -8,19 +8,23 @@ and the explorer **Web replay** tab plays them next to the conversation.
 
 ```text
 softprobe-code SPA
-  → @softprobe/web-record (rrweb)
-  → POST {baseUrl}/v1/traces   (OTLP protobuf, Bearer Ingestion Key)
-  → thelake DuckLake
-  → GET /v1/sessions/{session_id}/recording?from=&to=
-  → sp-llm explorer WebReplayPane (rrweb-player)
+  -> @softprobe/web-record
+  -> POST {baseUrl}/v1/traces
+  -> thelake-collector
+  -> thelake DuckLake
+  -> GET /v1/sessions/{session_id}/recording?from=&to=
+  -> sp-llm explorer WebReplayPane
 ```
 
-**Correlation:** OpenCode chat `ses_*` id → `session.id` and `sp.session.id` on
-recording spans. `@softprobe/web-record` uses the official OpenTelemetry browser
-SDK internally and mirrors the standard session attribute to Softprobe's product
-attribute. Recording spans are **excluded** from LLM session list/detail
-aggregates and conversation traces; use
-`GET …/sessions/{id}/recording` for replay.
+OpenCode chat `ses_*` identifiers or browser journey identifiers map to `session.id` and `sp.session.id` on recording and browser HTTP spans. `@softprobe/web-record` uses the official OpenTelemetry browser SDK internally. It propagates W3C `traceparent` to all same-origin and configured `apiOrigins` requests regardless of `httpBodyCapture.routes`, and injects W3C `baggage` with `sp.session.id` on same-origin `fetch` and `XMLHttpRequest` calls. Recording spans stay excluded from LLM session list and detail aggregates, conversation traces, `POST /v1/traces/search`, and default Tempo `/api/search` queries. Call `GET /v1/sessions/{session_id}/recording` for DOM replay.
+
+Before OTLP spans reach **thelake**, `thelake-collector` handles external session correlation on `POST /v1/traces`:
+
+1. Explicit `session.id`, `sp.session.id`, or `gen_ai.conversation.id` attributes stamp `sp.session.id` and register `(workspace_id, agent_id, trace_id)` in a bounded in-memory table with a 10-minute TTL.
+2. W3C `baggage` in `http.request.header.baggage` or `http.request.headers` stamps `sp.session.id` directly when browser OTLP uploads fail.
+3. Unresolved backend spans wait up to 2 seconds in `thelake-collector` for a matching sibling span, then pass through unmodified if no session arrives.
+
+**thelake** itself stays stateless on ingest and read. When a non-recording span arrives without a session attribute, **thelake** writes `traces.session_id = ''` directly to DuckLake and returns `null` for `session_id` on JSON trace reads while omitting `sp.session.id` in Tempo responses. OTLP fact tables sort by `'session_id, timestamp, trace_id'` so assigned sessions remain in contiguous Parquet row groups while unassigned rows preserve tight `timestamp` zone maps.
 
 The package embeds the official OpenTelemetry browser SDK, Fetch/XHR
 instrumentation, and OTLP exporter. `RecordSdk.init()` configures those official
@@ -105,8 +109,10 @@ dev and strips `Origin` for hosted thelake quirks.
   but does not paginate yet.
 - Browser HTTP trace context uses W3C `traceparent` / `tracestate` propagation
   for same-origin requests (`window.location.origin`), any origin declared in
-  `httpBodyCapture.routes`, and any optional `apiOrigins` override; the SDK does
-  not inject an `x-sp-session-id` header.
+  `httpBodyCapture.routes`, and any optional `apiOrigins` override. Same-origin
+  requests also carry `sp.session.id` in W3C `baggage` without triggering
+  cross-origin CORS preflights; the SDK does not inject an `x-sp-session-id`
+  header.
 
 ## Related docs
 

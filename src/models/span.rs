@@ -132,8 +132,8 @@ impl Span {
     pub fn compare_for_sort(&self, other: &Self) -> Ordering {
         self.session_id
             .cmp(&other.session_id)
-            .then_with(|| self.trace_id.cmp(&other.trace_id))
             .then_with(|| self.timestamp.cmp(&other.timestamp))
+            .then_with(|| self.trace_id.cmp(&other.trace_id))
     }
 
     /// Convert a batch of Spans to Arrow RecordBatch for DuckLake storage
@@ -243,7 +243,7 @@ impl Span {
 
         let trace_id = hex::encode(&otlp_span.trace_id);
 
-        let session_id = canonical.session_id.unwrap_or_else(|| trace_id.clone());
+        let session_id = canonical.session_id.unwrap_or_default();
 
         let mut span = Self {
             session_id,
@@ -363,6 +363,8 @@ impl Span {
             .attributes
             .get("http.request.path")
             .or_else(|| self.attributes.get("http.target"))
+            .or_else(|| self.attributes.get("url.path"))
+            .or_else(|| self.attributes.get("http.route"))
             .cloned();
 
         // Extract response status code from span attributes
@@ -531,6 +533,112 @@ fn canonicalize_multi_standard_llm_attributes(
         session_id,
         agent_name,
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SpanValidationError(pub String);
+
+impl std::fmt::Display for SpanValidationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for SpanValidationError {}
+
+pub fn is_valid_session_id(raw: &str) -> bool {
+    let trimmed = raw.trim();
+    !trimmed.is_empty()
+        && trimmed.len() <= 128
+        && trimmed.bytes().all(|b| (b'!'..=b'~').contains(&b))
+}
+
+pub fn is_recording_span(span: &Span) -> bool {
+    use crate::models::attr_keys::sp;
+    span.attributes
+        .get(sp::OBSERVATION_TYPE)
+        .or_else(|| span.resource_attributes.get(sp::OBSERVATION_TYPE))
+        .is_some_and(|v| v.trim() == "recording")
+}
+
+fn recording_span_session_id(span: &Span) -> Option<String> {
+    use crate::models::attr_keys::sp;
+    [sp::SESSION_ID, "sp_session_id", "session.id"]
+        .into_iter()
+        .find_map(|key| {
+            span.attributes
+                .get(key)
+                .filter(|val| is_valid_session_id(val))
+        })
+        .map(|val| val.trim().to_owned())
+}
+
+fn strip_invalid_session_aliases(attrs: &mut std::collections::HashMap<String, String>) {
+    use crate::models::attr_keys::SESSION_ID_PRECEDENCE;
+    for key in SESSION_ID_PRECEDENCE {
+        if attrs.get(*key).is_some_and(|val| !is_valid_session_id(val)) {
+            attrs.remove(*key);
+        }
+    }
+}
+
+/// Spans without a valid explicit session ID keep `session_id = ""` and persist directly
+/// without any cross-span or in-memory correlation.
+pub fn validate_and_normalize_ingest_batch(spans: &mut [Span]) -> Result<(), SpanValidationError> {
+    use crate::models::attr_keys::{sp, SESSION_ID_PRECEDENCE};
+
+    for span in spans.iter() {
+        if !is_recording_span(span) {
+            continue;
+        }
+        if recording_span_session_id(span).is_none() {
+            return Err(SpanValidationError(
+                "recording requires a valid span-level session.id".to_string(),
+            ));
+        }
+    }
+
+    for span in spans.iter_mut() {
+        if is_recording_span(span) {
+            let sid = recording_span_session_id(span);
+            strip_invalid_session_aliases(&mut span.attributes);
+            strip_invalid_session_aliases(&mut span.resource_attributes);
+            if let Some(sid) = sid {
+                span.session_id = sid.clone();
+                span.attributes.insert(sp::SESSION_ID.to_string(), sid);
+            }
+            continue;
+        }
+
+        let resolved = SESSION_ID_PRECEDENCE
+            .iter()
+            .find_map(|key| {
+                span.attributes
+                    .get(*key)
+                    .filter(|val| is_valid_session_id(val))
+            })
+            .or_else(|| {
+                SESSION_ID_PRECEDENCE.iter().find_map(|key| {
+                    span.resource_attributes
+                        .get(*key)
+                        .filter(|val| is_valid_session_id(val))
+                })
+            })
+            .map(|val| val.trim().to_owned());
+
+        strip_invalid_session_aliases(&mut span.attributes);
+        strip_invalid_session_aliases(&mut span.resource_attributes);
+
+        if let Some(sid) = resolved {
+            span.session_id = sid.clone();
+            span.attributes.insert(sp::SESSION_ID.to_string(), sid);
+        } else {
+            span.session_id.clear();
+            span.attributes.remove(sp::SESSION_ID);
+        }
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1375,9 +1483,10 @@ mod tests {
             !plain_http.attributes.contains_key("sp.observation.type"),
             "ordinary HTTP spans must not be tagged with sp.observation.type at ingest"
         );
+        assert_eq!(plain_http.session_id, "");
         assert!(
             !plain_http.attributes.contains_key("sp.session.id"),
-            "trace_id fallback must not synthesize sp.session.id"
+            "missing session.id must not synthesize sp.session.id"
         );
     }
 
@@ -1476,5 +1585,72 @@ mod tests {
                 .map(String::as_str),
             Some("95")
         );
+    }
+
+    #[test]
+    fn stateless_ingest_batch_validates_ascii_sessions_and_never_correlates_siblings() {
+        use super::{is_valid_session_id, validate_and_normalize_ingest_batch};
+
+        assert!(is_valid_session_id("sess-123_ABC:ok"));
+        assert!(is_valid_session_id("  trimmed-ok  "));
+        assert!(!is_valid_session_id(""));
+        assert!(!is_valid_session_id("   "));
+        assert!(!is_valid_session_id("has space"));
+        assert!(!is_valid_session_id("bad\nnewline"));
+        assert!(!is_valid_session_id("non-ascii-é"));
+        assert!(!is_valid_session_id(&"x".repeat(129)));
+
+        let mut browser = base_span();
+        browser.trace_id = "1111".to_string();
+        browser.span_id = "01".to_string();
+        browser
+            .attributes
+            .insert("session.id".to_string(), "sess-browser".to_string());
+
+        let mut sibling_without_session = base_span();
+        sibling_without_session.session_id.clear();
+        sibling_without_session.trace_id = "1111".to_string();
+        sibling_without_session.span_id = "02".to_string();
+        sibling_without_session.attributes.insert(
+            "http.request.header.baggage".to_string(),
+            "sp.session.id=sess-browser".to_string(),
+        );
+
+        let mut invalid_attr_span = base_span();
+        invalid_attr_span.trace_id = "2222".to_string();
+        invalid_attr_span.span_id = "03".to_string();
+        invalid_attr_span
+            .attributes
+            .insert("sp.session.id".to_string(), "bad session id".to_string());
+
+        let mut batch = vec![browser, sibling_without_session, invalid_attr_span];
+        validate_and_normalize_ingest_batch(&mut batch).expect("ordinary batch succeeds");
+
+        assert_eq!(batch[0].session_id, "sess-browser");
+        assert_eq!(
+            batch[0].attributes.get("sp.session.id").map(String::as_str),
+            Some("sess-browser")
+        );
+        assert_eq!(batch[1].session_id, "");
+        assert!(!batch[1].attributes.contains_key("sp.session.id"));
+        assert_eq!(batch[2].session_id, "");
+        assert!(!batch[2].attributes.contains_key("sp.session.id"));
+
+        let mut bad_recording = base_span();
+        bad_recording.session_id.clear();
+        bad_recording
+            .attributes
+            .insert("sp.observation.type".to_string(), "recording".to_string());
+        assert!(validate_and_normalize_ingest_batch(&mut [bad_recording]).is_err());
+
+        let mut good_recording = base_span();
+        good_recording.session_id.clear();
+        good_recording
+            .attributes
+            .insert("sp.observation.type".to_string(), "recording".to_string());
+        good_recording
+            .attributes
+            .insert("session.id".to_string(), "sess-rec-ok".to_string());
+        validate_and_normalize_ingest_batch(&mut [good_recording]).expect("valid recording");
     }
 }

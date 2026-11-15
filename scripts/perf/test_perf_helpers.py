@@ -155,7 +155,7 @@ class SeedSqlTests(unittest.TestCase):
         self.assertIn("CREATE TABLE IF NOT EXISTS seedlake.traces AS SELECT * FROM read_parquet", sql)
         self.assertIn("LIMIT 0;", sql)
         self.assertIn(f"SET PARTITIONED BY ({ONE_CLOCK_PARTITION_BY})", sql)
-        self.assertIn("SET SORTED BY (session_id, trace_id, timestamp)", sql)
+        self.assertIn("SET SORTED BY (session_id, timestamp, trace_id)", sql)
         self.assertIn("INSERT INTO seedlake.traces BY NAME SELECT * FROM read_parquet", sql)
         # Must not load data via CTAS (no CTAS without LIMIT 0)
         create_lines = [ln for ln in sql.splitlines() if "CREATE TABLE" in ln]

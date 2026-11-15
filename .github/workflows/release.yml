@@ -42,6 +42,12 @@ jobs:
           cache: npm
           cache-dependency-path: packages/thelake-explorer/package-lock.json
 
+      - name: Set up Go for thelake-collector
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+          cache-dependency-path: collector/go.sum
+
       - name: Publish versioned thelake Explorer package
         working-directory: packages/thelake-explorer
         env:
