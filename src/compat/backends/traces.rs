@@ -141,12 +141,17 @@ pub trait TraceQueryBackend: Send + Sync {
         request: TraceSearchRequest,
     ) -> Result<Vec<TraceSearchHit>, CompatError>;
 
-    async fn search_tags(&self, ctx: &CompatWorkspaceContext) -> Result<Vec<String>, CompatError>;
+    async fn search_tags(
+        &self,
+        ctx: &CompatWorkspaceContext,
+        bounds: TraceLookupBounds,
+    ) -> Result<Vec<String>, CompatError>;
 
     async fn search_tag_values(
         &self,
         ctx: &CompatWorkspaceContext,
         tag: &str,
+        bounds: TraceLookupBounds,
     ) -> Result<Vec<String>, CompatError>;
 }
 
@@ -172,7 +177,11 @@ impl TraceQueryBackend for UnsupportedTraceBackend {
         Err(CompatError::unsupported("trace_search"))
     }
 
-    async fn search_tags(&self, _ctx: &CompatWorkspaceContext) -> Result<Vec<String>, CompatError> {
+    async fn search_tags(
+        &self,
+        _ctx: &CompatWorkspaceContext,
+        _bounds: TraceLookupBounds,
+    ) -> Result<Vec<String>, CompatError> {
         Err(CompatError::unsupported("trace_search_tags"))
     }
 
@@ -180,6 +189,7 @@ impl TraceQueryBackend for UnsupportedTraceBackend {
         &self,
         _ctx: &CompatWorkspaceContext,
         _tag: &str,
+        _bounds: TraceLookupBounds,
     ) -> Result<Vec<String>, CompatError> {
         Err(CompatError::unsupported("trace_search_tag_values"))
     }

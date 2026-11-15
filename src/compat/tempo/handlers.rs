@@ -157,18 +157,23 @@ async fn tags_handler(
     headers: HeaderMap,
     uri: Uri,
 ) -> Response {
-    if let Err(err) = parse_tempo_tag_params(&pairs(&uri)) {
-        return error_response(PROTOCOL, err);
-    }
     let ctx = match compat_workspace_context(auth, &headers) {
         Ok(ctx) => ctx,
         Err(err) => return error_response(PROTOCOL, err),
+    };
+    let tag_params = match parse_tempo_tag_params(&pairs(&uri), &ctx.limits) {
+        Ok(params) => params,
+        Err(err) => return error_response(PROTOCOL, err),
+    };
+    let bounds = TraceLookupBounds {
+        start_ns: tag_params.start_ns,
+        end_ns: tag_params.end_ns,
     };
     let backend = match backend_for(&state, &ctx).await {
         Ok(backend) => backend,
         Err(err) => return error_response(PROTOCOL, err),
     };
-    match backend.search_tags(&ctx).await {
+    match backend.search_tags(&ctx, bounds).await {
         Ok(values) => tag_names_response(&values, ctx.limits.max_response_bytes)
             .unwrap_or_else(|err| error_response(PROTOCOL, err)),
         Err(err) => error_response(PROTOCOL, err),
@@ -182,21 +187,26 @@ async fn tag_values_handler(
     headers: HeaderMap,
     uri: Uri,
 ) -> Response {
-    if let Err(err) = parse_tempo_tag_params(&pairs(&uri)) {
-        return error_response(PROTOCOL, err);
-    }
     let ctx = match compat_workspace_context(auth, &headers) {
         Ok(ctx) => ctx,
+        Err(err) => return error_response(PROTOCOL, err),
+    };
+    let tag_params = match parse_tempo_tag_params(&pairs(&uri), &ctx.limits) {
+        Ok(params) => params,
         Err(err) => return error_response(PROTOCOL, err),
     };
     if tag.trim().is_empty() {
         return error_response(PROTOCOL, bad("tag must not be empty"));
     }
+    let bounds = TraceLookupBounds {
+        start_ns: tag_params.start_ns,
+        end_ns: tag_params.end_ns,
+    };
     let backend = match backend_for(&state, &ctx).await {
         Ok(backend) => backend,
         Err(err) => return error_response(PROTOCOL, err),
     };
-    match backend.search_tag_values(&ctx, &tag).await {
+    match backend.search_tag_values(&ctx, &tag, bounds).await {
         Ok(values) => tag_values_response(&values, ctx.limits.max_response_bytes)
             .unwrap_or_else(|err| error_response(PROTOCOL, err)),
         Err(err) => error_response(PROTOCOL, err),

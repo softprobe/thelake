@@ -112,6 +112,9 @@ impl DuckLakeTraceBackend {
     }
 
     fn matches_tags(&self, span: &TraceSpan, request: &TraceSearchRequest) -> bool {
+        if request.tags.is_empty() {
+            return true;
+        }
         let tags = self.tags_for(span, usize::MAX);
         request.tags.iter().all(|(key, expected)| {
             tags.get(key)
@@ -245,9 +248,11 @@ impl DuckLakeTraceBackend {
     async fn event_link_tags(
         &self,
         ctx: &CompatWorkspaceContext,
+        bounds: TraceLookupBounds,
     ) -> Result<Vec<(String, String)>, CompatError> {
-        let trusted = tag_event_link_rows_sql(ctx.limits.max_series)
-            .map_err(|msg| CompatError::new(CompatErrorCode::BadRequest, msg))?;
+        let trusted =
+            tag_event_link_rows_sql(bounds.start_ns, bounds.end_ns, ctx.limits.max_series)
+                .map_err(|msg| CompatError::new(CompatErrorCode::BadRequest, msg))?;
         let result = self.execute(ctx, trusted).await?;
         if result.rows.is_empty() {
             return Ok(Vec::new());
@@ -397,8 +402,17 @@ impl TraceQueryBackend for DuckLakeTraceBackend {
         Ok(hits)
     }
 
-    async fn search_tags(&self, ctx: &CompatWorkspaceContext) -> Result<Vec<String>, CompatError> {
-        let trusted = tag_names_map_keys_sql(ctx.limits.max_series)
+    async fn search_tags(
+        &self,
+        ctx: &CompatWorkspaceContext,
+        bounds: TraceLookupBounds,
+    ) -> Result<Vec<String>, CompatError> {
+        if let (Some(start), Some(end)) = (bounds.start_ns, bounds.end_ns) {
+            if start == end {
+                return Ok(Vec::new());
+            }
+        }
+        let trusted = tag_names_map_keys_sql(bounds.start_ns, bounds.end_ns, ctx.limits.max_series)
             .map_err(|msg| CompatError::new(CompatErrorCode::BadRequest, msg))?;
         let result = self.execute(ctx, trusted).await?;
         let mut names = BTreeSet::new();
@@ -412,7 +426,7 @@ impl TraceQueryBackend for DuckLakeTraceBackend {
                 }
             }
         }
-        for (key, _) in self.event_link_tags(ctx).await? {
+        for (key, _) in self.event_link_tags(ctx, bounds).await? {
             names.insert(key);
         }
         Ok(names.into_iter().take(ctx.limits.max_series).collect())
@@ -422,8 +436,14 @@ impl TraceQueryBackend for DuckLakeTraceBackend {
         &self,
         ctx: &CompatWorkspaceContext,
         tag: &str,
+        bounds: TraceLookupBounds,
     ) -> Result<Vec<String>, CompatError> {
-        let trusted = tag_values_sql(tag, ctx.limits.max_series)
+        if let (Some(start), Some(end)) = (bounds.start_ns, bounds.end_ns) {
+            if start == end {
+                return Ok(Vec::new());
+            }
+        }
+        let trusted = tag_values_sql(tag, bounds.start_ns, bounds.end_ns, ctx.limits.max_series)
             .map_err(|msg| CompatError::new(CompatErrorCode::BadRequest, msg))?;
         let result = self.execute(ctx, trusted).await?;
         let mut values = BTreeSet::new();
@@ -432,7 +452,7 @@ impl TraceQueryBackend for DuckLakeTraceBackend {
                 values.insert(value);
             }
         }
-        for (key, value) in self.event_link_tags(ctx).await? {
+        for (key, value) in self.event_link_tags(ctx, bounds).await? {
             if key == tag {
                 values.insert(value);
             }
@@ -949,8 +969,10 @@ fn field_value(field: &TraceField, span: &TraceSpan) -> Option<String> {
         TraceField::Intrinsic(key) => match key.as_str() {
             "name" | "span:name" | "span.name" => Some(span.name.clone()),
             "kind" | "span:kind" | "span.kind" => span.kind.clone(),
-            "status" | "span:status" | "span.status" | "status_code" | "span:status_code"
-            | "span.status_code" => span_status_code_value(span),
+            "status" | "span:status" | "span.status" => {
+                span.status_code.clone().filter(|s| !s.is_empty())
+            }
+            "status_code" | "span:status_code" | "span.status_code" => span_status_code_value(span),
             "statusMessage" | "span:statusMessage" | "span.statusMessage" => {
                 span.status_message.clone()
             }
@@ -1298,6 +1320,52 @@ mod tests {
             assert!(
                 DuckLakeTraceBackend::matches_selector(&selector, &span),
                 "query should use the same post-filter field value: {query}"
+            );
+        }
+    }
+
+    #[test]
+    fn pure_status_intrinsic_ignores_custom_status_attribute_while_scoped_aliases_read_attribute() {
+        let span = TraceSpan {
+            trace_id: "t".into(),
+            span_id: "s".into(),
+            parent_span_id: None,
+            name: "root".into(),
+            kind: None,
+            start_time_unix_nano: 1,
+            end_time_unix_nano: Some(2),
+            attributes: vec![TraceAttribute {
+                key: "status".into(),
+                value: "error".into(),
+            }],
+            status_code: Some("STATUS_CODE_OK".into()),
+            status_message: None,
+            events: Vec::new(),
+            service_name: None,
+            resource_attributes: Vec::new(),
+            instrumentation_scope: None,
+            links: Vec::new(),
+        };
+
+        for intrinsic_ok in [r#"{ status = ok }"#, r#"{ span:status = ok }"#] {
+            let selector = crate::compat::tempo::traceql::parse_traceql(intrinsic_ok).unwrap();
+            assert!(
+                DuckLakeTraceBackend::matches_selector(&selector, &span),
+                "OTLP status intrinsic must read scalar status_code: {intrinsic_ok}"
+            );
+        }
+        for intrinsic_err in [r#"{ status = error }"#, r#"{ span:status = error }"#] {
+            let selector = crate::compat::tempo::traceql::parse_traceql(intrinsic_err).unwrap();
+            assert!(
+                !DuckLakeTraceBackend::matches_selector(&selector, &span),
+                "OTLP status intrinsic must not be shadowed by custom attributes['status']: {intrinsic_err}"
+            );
+        }
+        for scoped_err in [r#"{ span.status = error }"#, r#"{ .status = error }"#] {
+            let selector = crate::compat::tempo::traceql::parse_traceql(scoped_err).unwrap();
+            assert!(
+                DuckLakeTraceBackend::matches_selector(&selector, &span),
+                "scoped .status / span.status should match custom attribute: {scoped_err}"
             );
         }
     }

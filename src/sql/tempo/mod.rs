@@ -1,11 +1,13 @@
 //! Tempo / TraceQL lake scan SQL recipes (one clock: `timestamp` only).
 
-use crate::compat::tempo::traceql::{is_duration_field, parse_duration_ns, TraceSelector};
+use crate::compat::tempo::traceql::{
+    is_duration_field, parse_duration_ns, TraceField, TracePredicate, TraceSelector,
+};
 use crate::sql::literal::sql_string_literal;
 use crate::sql::query_window_from_exclusive_ns;
 use crate::sql::trusted::{approved_query, TrustedSql};
-use crate::storage::schema::attribute_map::prefer_attr_varchar;
-use std::collections::BTreeMap;
+use crate::storage::schema::attribute_map::{attribute_map_varchar, prefer_attr_varchar};
+use std::collections::{BTreeMap, HashSet};
 
 /// Status-code name → numeric mappings embedded in Tempo predicate SQL.
 pub(crate) const PERSISTED_OTLP_STATUS_CODES: [(&str, i64); 12] = [
@@ -31,11 +33,38 @@ const TEMPO_DEFAULT_LOOKBACK_NS: i64 = 10 * 365 * 24 * 60 * 60 * 1_000_000_000;
 /// from slightly ahead browser or backend clocks remain visible on `/api/v2/traces/{id}` and tag discovery.
 const TEMPO_CLOCK_SKEW_NS: i64 = 5 * 60 * 1_000_000_000;
 const TRACE_SCAN_SQL: &str = include_str!("trace_scan.sql");
+const TRACE_SEARCH_SUMMARY_SCAN_SQL: &str = include_str!("trace_search_summary_scan.sql");
+const TRACE_UNFILTERED_SUMMARY_SCAN_SQL: &str = include_str!("trace_unfiltered_summary_scan.sql");
+const TRACE_LOOKUP_SCAN_SQL: &str = include_str!("trace_lookup_scan.sql");
 const TRACE_ID_FILTER_SQL: &str = include_str!("trace_id_filter.sql");
 const EXCLUDE_RECORDING_FILTER_SQL: &str = include_str!("exclude_recording_filter.sql");
 const TAG_NAMES_MAP_KEYS_SQL: &str = include_str!("tag_names_map_keys.sql");
 const TAG_EVENT_LINK_ROWS_SQL: &str = include_str!("tag_event_link_rows.sql");
 const TAG_VALUES_SQL: &str = include_str!("tag_values.sql");
+
+const FILTER_BASE_CANDIDATE_COLUMNS: &[&str] = &[
+    "message_type",
+    "span_kind",
+    "app_id",
+    "agent_id",
+    "agent_name",
+    "session_id",
+    "status_code",
+    "status_message",
+    "observation_type",
+    "model_name",
+    "model_provider",
+    "user_id",
+    "session_attr_id",
+    "service_name",
+    "attributes",
+    "resource_attributes",
+    "instrumentation_scope",
+];
+
+const TRACE_START_NS_EXPR: &str = "CAST(epoch_ns(timestamp) AS BIGINT)";
+const TRACE_END_NS_EXPR: &str =
+    "COALESCE(CAST(epoch_ns(end_timestamp) AS BIGINT), CAST(epoch_ns(timestamp) AS BIGINT))";
 
 /// Inputs for a Tempo lake scan (protocol adapters map request types here).
 #[derive(Debug, Clone, Copy)]
@@ -102,8 +131,12 @@ pub(crate) fn trace_scan_sql(
     approved_query(sql).map_err(|error| error.to_string())
 }
 
-pub(crate) fn tag_names_map_keys_sql(limit: usize) -> Result<TrustedSql, String> {
-    let (start_ns, end_ns) = resolve_tempo_scan_window(None, None)?;
+pub(crate) fn tag_names_map_keys_sql(
+    start_ns: Option<i64>,
+    end_ns: Option<i64>,
+    limit: usize,
+) -> Result<TrustedSql, String> {
+    let (start_ns, end_ns) = resolve_tempo_scan_window(start_ns, end_ns)?;
     let window = query_window_from_exclusive_ns(start_ns, end_ns)?;
     let limit = limit.max(1);
     let sql = window
@@ -116,8 +149,12 @@ pub(crate) fn tag_names_map_keys_sql(limit: usize) -> Result<TrustedSql, String>
     approved_query(sql).map_err(|error| error.to_string())
 }
 
-pub(crate) fn tag_event_link_rows_sql(limit: usize) -> Result<TrustedSql, String> {
-    let (start_ns, end_ns) = resolve_tempo_scan_window(None, None)?;
+pub(crate) fn tag_event_link_rows_sql(
+    start_ns: Option<i64>,
+    end_ns: Option<i64>,
+    limit: usize,
+) -> Result<TrustedSql, String> {
+    let (start_ns, end_ns) = resolve_tempo_scan_window(start_ns, end_ns)?;
     let window = query_window_from_exclusive_ns(start_ns, end_ns)?;
     let limit = limit.max(1);
     let sql = window
@@ -130,8 +167,13 @@ pub(crate) fn tag_event_link_rows_sql(limit: usize) -> Result<TrustedSql, String
     approved_query(sql).map_err(|error| error.to_string())
 }
 
-pub(crate) fn tag_values_sql(tag: &str, limit: usize) -> Result<TrustedSql, String> {
-    let (start_ns, end_ns) = resolve_tempo_scan_window(None, None)?;
+pub(crate) fn tag_values_sql(
+    tag: &str,
+    start_ns: Option<i64>,
+    end_ns: Option<i64>,
+    limit: usize,
+) -> Result<TrustedSql, String> {
+    let (start_ns, end_ns) = resolve_tempo_scan_window(start_ns, end_ns)?;
     let window = query_window_from_exclusive_ns(start_ns, end_ns)?;
     let limit = limit.max(1);
     let tag_expr = tag_value_sql(tag);
@@ -153,6 +195,12 @@ fn compile_trace_scan_sql(
     let (start_ns, end_ns) = resolve_tempo_scan_window(params.start_ns, params.end_ns)?;
     let window = query_window_from_exclusive_ns(start_ns, end_ns)?;
 
+    let is_plain_trace_lookup = trace_id.is_some()
+        && params.tags.is_empty()
+        && params.selector.is_none()
+        && params.min_duration_ns.is_none()
+        && params.max_duration_ns.is_none();
+
     let tag_predicates = params
         .tags
         .iter()
@@ -168,15 +216,17 @@ fn compile_trace_scan_sql(
         .map(|predicate| format!("({predicate})"))
         .collect::<Vec<_>>()
         .join(" AND ");
+    let filter_extra_columns = filter_extra_columns_sql(&row_predicate);
+
     let mut duration_predicates = Vec::new();
     if let Some(min) = params.min_duration_ns {
         duration_predicates.push(format!(
-            "MAX(COALESCE(end_time_unix_nano, start_time_unix_nano)) - MIN(start_time_unix_nano) >= {min}"
+            "MAX({TRACE_END_NS_EXPR}) - MIN({TRACE_START_NS_EXPR}) >= {min}"
         ));
     }
     if let Some(max) = params.max_duration_ns {
         duration_predicates.push(format!(
-            "MAX(COALESCE(end_time_unix_nano, start_time_unix_nano)) - MIN(start_time_unix_nano) <= {max}"
+            "MAX({TRACE_END_NS_EXPR}) - MIN({TRACE_START_NS_EXPR}) <= {max}"
         ));
     }
     let duration_predicate = if duration_predicates.is_empty() {
@@ -189,6 +239,20 @@ fn compile_trace_scan_sql(
         cap
     } else {
         params.limit.max(1)
+    };
+    let has_row_filter =
+        !params.tags.is_empty() || !matches!(params.selector, None | Some(TraceSelector::All));
+    let can_use_summary_projection = trace_id.is_none()
+        && params.tags.is_empty()
+        && !params.selector.is_some_and(selector_uses_instrumentation);
+    let template = if is_plain_trace_lookup {
+        TRACE_LOOKUP_SCAN_SQL
+    } else if !has_row_filter && can_use_summary_projection {
+        TRACE_UNFILTERED_SUMMARY_SCAN_SQL
+    } else if can_use_summary_projection {
+        TRACE_SEARCH_SUMMARY_SCAN_SQL
+    } else {
+        TRACE_SCAN_SQL
     };
     let trace_id = trace_id.map(str::to_owned);
     let default_observation_filter = if trace_id.is_none() && !query_mentions_recording(&params) {
@@ -203,16 +267,86 @@ fn compile_trace_scan_sql(
                 Some(id) => TRACE_ID_FILTER_SQL.replace("{{trace_id}}", &sql_string_literal(id)),
                 None => String::new(),
             };
-            TRACE_SCAN_SQL
+            template
                 .replace("{{trace_id_prefix}}", &trace_id_prefix)
                 .replace("{{timestamp_filter}}", bound)
                 .replace("{{default_observation_filter}}", default_observation_filter)
+                .replace("{{filter_extra_columns}}", &filter_extra_columns)
                 .replace("{{row_predicate}}", &row_predicate)
                 .replace("{{duration_predicate}}", &duration_predicate)
                 .replace("{{trace_limit}}", &trace_limit.to_string())
                 .replace("{{cap}}", &cap.to_string())
         })
         .into_sql())
+}
+
+fn selector_uses_instrumentation(selector: &TraceSelector) -> bool {
+    match selector {
+        TraceSelector::All => false,
+        TraceSelector::And(left, right) | TraceSelector::Or(left, right) => {
+            selector_uses_instrumentation(left) || selector_uses_instrumentation(right)
+        }
+        TraceSelector::Predicate(predicate) => {
+            matches!(predicate_field(predicate), TraceField::Instrumentation(_))
+        }
+    }
+}
+
+fn predicate_field(predicate: &TracePredicate) -> &TraceField {
+    match predicate {
+        TracePredicate::Eq(f, _)
+        | TracePredicate::NotEq(f, _)
+        | TracePredicate::Regex(f, _)
+        | TracePredicate::NotRegex(f, _)
+        | TracePredicate::Greater(f, _)
+        | TracePredicate::GreaterOrEqual(f, _)
+        | TracePredicate::Less(f, _)
+        | TracePredicate::LessOrEqual(f, _) => f,
+    }
+}
+
+fn filter_extra_columns_sql(row_predicate: &str) -> String {
+    let unquoted = strip_single_quoted_literals(row_predicate);
+    let referenced: HashSet<&str> = unquoted
+        .split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+        .filter(|tok| !tok.is_empty())
+        .collect();
+    let mut out = String::new();
+    for &col in FILTER_BASE_CANDIDATE_COLUMNS {
+        if referenced.contains(col) {
+            out.push_str(",\n        ");
+            out.push_str(col);
+        }
+    }
+    out
+}
+
+fn strip_single_quoted_literals(sql: &str) -> String {
+    let bytes = sql.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    let mut in_quote = false;
+    while i < bytes.len() {
+        if in_quote {
+            if bytes[i] == b'\'' {
+                if bytes.get(i + 1) == Some(&b'\'') {
+                    i += 2;
+                    continue;
+                }
+                in_quote = false;
+            }
+            i += 1;
+            continue;
+        }
+        if bytes[i] == b'\'' {
+            in_quote = true;
+            out.push(b' ');
+        } else {
+            out.push(bytes[i]);
+        }
+        i += 1;
+    }
+    String::from_utf8(out).expect("valid UTF-8 SQL fragment")
 }
 
 fn query_mentions_recording(params: &TraceScanParams<'_>) -> bool {
@@ -259,15 +393,11 @@ pub fn scan_reached_cap(row_count: usize, cap: usize) -> bool {
     row_count >= cap
 }
 
-fn json_path(key: &str) -> String {
-    format!("$.\"{}\"", key.replace('\\', "\\\\").replace('"', "\\\""))
-}
-
-fn json_string(column: &str, key: &str) -> String {
-    format!(
-        "json_extract_string(CAST({column} AS JSON), {})",
-        sql_string_literal(&json_path(key))
-    )
+fn span_only_attribute_value(key: &str) -> String {
+    if let Some(expr) = span_promoted_attr_expr(key) {
+        return expr;
+    }
+    attribute_map_varchar("attributes", key)
 }
 
 fn span_attribute_value(key: &str) -> String {
@@ -276,13 +406,12 @@ fn span_attribute_value(key: &str) -> String {
     }
     format!(
         "COALESCE({}, {})",
-        json_string("attributes", key),
-        json_string("resource_attributes", key)
+        attribute_map_varchar("attributes", key),
+        attribute_map_varchar("resource_attributes", key)
     )
 }
 
-/// Prefer product-hot / first-class columns from traces-query-hot-attrs.yaml.
-fn promoted_attr_expr(key: &str) -> Option<String> {
+fn span_promoted_attr_expr(key: &str) -> Option<String> {
     let promo = crate::sql::llm::llm_promo();
     match key {
         "sp.observation.type" => Some(prefer_attr_varchar(
@@ -310,29 +439,86 @@ fn promoted_attr_expr(key: &str) -> Option<String> {
             prefer_attr_varchar(None, "attributes", "sp.session.id"),
             prefer_attr_varchar(None, "attributes", "session.id")
         )),
+        _ => None,
+    }
+}
+
+/// Prefer product-hot / first-class columns from traces-query-hot-attrs.yaml.
+fn promoted_attr_expr(key: &str) -> Option<String> {
+    let promo = crate::sql::llm::llm_promo();
+    match key {
+        "sp.observation.type" => Some(format!(
+            "COALESCE({}, {}, {})",
+            promo.observation_type,
+            attribute_map_varchar("attributes", "sp.observation.type"),
+            attribute_map_varchar("resource_attributes", "sp.observation.type")
+        )),
+        "gen_ai.request.model" => Some(format!(
+            "COALESCE({}, {}, {})",
+            promo.model_name,
+            attribute_map_varchar("attributes", "gen_ai.request.model"),
+            attribute_map_varchar("resource_attributes", "gen_ai.request.model")
+        )),
+        "gen_ai.provider.name" => Some(format!(
+            "COALESCE({}, {}, {})",
+            promo.model_provider,
+            attribute_map_varchar("attributes", "gen_ai.provider.name"),
+            attribute_map_varchar("resource_attributes", "gen_ai.provider.name")
+        )),
+        "sp.user.id" => Some(format!(
+            "COALESCE({}, {}, {})",
+            promo.user_id,
+            attribute_map_varchar("attributes", "sp.user.id"),
+            attribute_map_varchar("resource_attributes", "sp.user.id")
+        )),
+        "sp.session.id" | "session.id" => Some(format!(
+            "COALESCE(NULLIF(session_id, ''), session_attr_id, {}, {}, {})",
+            prefer_attr_varchar(None, "attributes", "sp.session.id"),
+            prefer_attr_varchar(None, "attributes", "session.id"),
+            attribute_map_varchar("resource_attributes", key)
+        )),
         "sp.agent.id" => Some(format!(
             "COALESCE(NULLIF(agent_id, ''), {}, {})",
-            json_string("attributes", "sp.agent.id"),
-            json_string("resource_attributes", "sp.agent.id")
+            attribute_map_varchar("attributes", "sp.agent.id"),
+            attribute_map_varchar("resource_attributes", "sp.agent.id")
         )),
         "sp.agent.name" => Some(format!(
             "COALESCE(NULLIF(agent_name, ''), {}, {})",
-            json_string("attributes", "sp.agent.name"),
-            json_string("resource_attributes", "sp.agent.name")
+            attribute_map_varchar("attributes", "sp.agent.name"),
+            attribute_map_varchar("resource_attributes", "sp.agent.name")
         )),
         "service.name" => Some(format!(
             "COALESCE(service_name, {}, {}, app_id)",
-            json_string("attributes", key),
-            json_string("resource_attributes", key)
+            attribute_map_varchar("attributes", key),
+            attribute_map_varchar("resource_attributes", key)
         )),
         _ => None,
     }
 }
 
+fn resource_attribute_value(key: &str) -> String {
+    match key {
+        "service.name" => format!(
+            "COALESCE(service_name, {}, app_id)",
+            attribute_map_varchar("resource_attributes", "service.name")
+        ),
+        "sp.agent.id" => format!(
+            "COALESCE(NULLIF(agent_id, ''), {})",
+            attribute_map_varchar("resource_attributes", "sp.agent.id")
+        ),
+        "sp.agent.name" => format!(
+            "COALESCE(NULLIF(agent_name, ''), {})",
+            attribute_map_varchar("resource_attributes", "sp.agent.name")
+        ),
+        _ => attribute_map_varchar("resource_attributes", key),
+    }
+}
+
 fn span_status_code_sql() -> String {
     format!(
-        "COALESCE({}, status_code)",
-        json_string("attributes", "status_code")
+        "COALESCE({}, {}, NULLIF(status_code, ''))",
+        attribute_map_varchar("attributes", "status_code"),
+        attribute_map_varchar("attributes", "status")
     )
 }
 
@@ -398,22 +584,14 @@ fn predicate_sql(predicate: &crate::compat::tempo::traceql::TracePredicate) -> S
         {
             span_status_code_sql()
         }
-        TraceField::Span(key) | TraceField::Unscoped(key) => span_attribute_value(key),
-        TraceField::Resource(key) => {
-            if matches!(
-                key.as_str(),
-                "service.name" | "sp.agent.id" | "sp.agent.name"
-            ) {
-                promoted_attr_expr(key).expect("promoted resource mapping")
-            } else {
-                json_string("resource_attributes", key)
-            }
-        }
-        TraceField::Instrumentation(key) => json_string("instrumentation_scope", key),
+        TraceField::Span(key) => span_only_attribute_value(key),
+        TraceField::Unscoped(key) => span_attribute_value(key),
+        TraceField::Resource(key) => resource_attribute_value(key),
+        TraceField::Instrumentation(key) => attribute_map_varchar("instrumentation_scope", key),
         TraceField::Intrinsic(key) => match key.as_str() {
             "name" | "span:name" | "span.name" => "message_type".into(),
             "kind" | "span:kind" | "span.kind" => "span_kind".into(),
-            "status" | "span:status" | "span.status" => span_status_code_sql(),
+            "status" | "span:status" | "span.status" => "NULLIF(status_code, '')".into(),
             "status_code" | "span:status_code" | "span.status_code" => span_status_code_sql(),
             "statusMessage" | "span:statusMessage" | "span.statusMessage" => {
                 "status_message".into()
@@ -427,8 +605,10 @@ fn predicate_sql(predicate: &crate::compat::tempo::traceql::TracePredicate) -> S
     };
     let is_status = is_persisted_status_code_field(field);
     let numeric = is_numeric_field(field);
-    let actual_numeric = if is_status || numeric {
+    let actual_numeric = if is_status {
         persisted_status_code_numeric_sql(&actual)
+    } else if numeric {
+        format!("TRY_CAST({actual} AS BIGINT)")
     } else {
         actual.clone()
     };
@@ -712,12 +892,151 @@ mod tests {
             trace_scan_sql(windowed(&empty, Some(&selector), None, None, 1), None).expect("sql");
         let sql = sql.as_str();
         assert!(
-            sql.contains("TRY_CAST(COALESCE(json_extract_string")
-                || sql.contains("TRY_CAST(json_extract_string"),
-            "numeric span predicates must TRY_CAST extracted JSON strings, got: {sql}"
+            !sql.contains("json_extract_string"),
+            "Tempo SQL must use native MAP indexing rather than JSON serialization: {sql}"
         );
+        assert!(
+            sql.contains("attributes['http.status_code']"),
+            "numeric span predicates must index MAP attributes directly, got: {sql}"
+        );
+        assert!(sql.contains("TRY_CAST("));
         assert!(sql.contains(">= 500"));
         assert!(!sql.contains("AS VARCHAR) >= 500"));
+    }
+
+    #[test]
+    fn pure_scalar_intrinsics_prune_all_map_columns_from_qualification_and_summary_omits_heavy_fields(
+    ) {
+        let empty = BTreeMap::new();
+        for query in [
+            r#"{}"#,
+            r#"{ status = error }"#,
+            r#"{ span:status = ok }"#,
+            r#"{ duration >= 100ms }"#,
+            r#"{ name = "GET /checkout" }"#,
+            r#"{ kind = "SPAN_KIND_SERVER" }"#,
+            r#"{ statusMessage = "timeout" }"#,
+        ] {
+            let selector = crate::compat::tempo::traceql::parse_traceql(query).unwrap();
+            let sql = trace_scan_sql(
+                windowed(&empty, Some(&selector), Some(100_000_000), None, 20),
+                None,
+            )
+            .expect("sql");
+            let sql = sql.as_str();
+            assert!(
+                !sql.contains("json_extract_string"),
+                "no JSON cast allowed for {query}: {sql}"
+            );
+            let outer_pos = sql
+                .find("\nSELECT\n")
+                .expect("outer SELECT boundary after WITH block");
+            let qualification_sql = &sql[..outer_pos];
+            let outer_select = &sql[outer_pos..];
+            assert!(
+                !qualification_sql.contains("attributes"),
+                "qualification CTE must not project or read attributes/resource_attributes for scalar query {query}: {qualification_sql}"
+            );
+            assert!(
+                !qualification_sql.contains("instrumentation_scope"),
+                "qualification CTE must not project instrumentation_scope for scalar query {query}: {qualification_sql}"
+            );
+            assert!(
+                !outer_select.contains("events"),
+                "summary search must omit events for {query}: {outer_select}"
+            );
+            assert!(
+                !outer_select.contains("links"),
+                "summary search must omit links for {query}: {outer_select}"
+            );
+            assert!(
+                !outer_select.contains("instrumentation_scope"),
+                "summary search must omit instrumentation_scope for {query}: {outer_select}"
+            );
+        }
+    }
+
+    #[test]
+    fn scoped_selectors_project_only_referenced_map_columns_and_lookup_preserves_full_payload() {
+        let empty = BTreeMap::new();
+
+        let span_sel =
+            crate::compat::tempo::traceql::parse_traceql(r#"{ span.http.method = "POST" }"#)
+                .unwrap();
+        let span_sql =
+            trace_scan_sql(windowed(&empty, Some(&span_sel), None, None, 10), None).expect("sql");
+        let span_qual =
+            &span_sql.as_str()[..span_sql.as_str().find("qualified_traces AS").unwrap()];
+        assert!(span_qual.contains("attributes"));
+        assert!(!span_qual.contains("resource_attributes"));
+        assert!(!span_qual.contains("instrumentation_scope"));
+
+        let res_sel = crate::compat::tempo::traceql::parse_traceql(
+            r#"{ resource.deployment.environment = "staging" }"#,
+        )
+        .unwrap();
+        let res_sql =
+            trace_scan_sql(windowed(&empty, Some(&res_sel), None, None, 10), None).expect("sql");
+        let res_qual = &res_sql.as_str()[..res_sql.as_str().find("qualified_traces AS").unwrap()];
+        assert!(res_qual.contains("resource_attributes"));
+        assert!(
+            !res_qual.contains("\n        attributes,"),
+            "resource selector must not project span attributes in filter_base: {res_qual}"
+        );
+        assert!(!res_qual.contains("instrumentation_scope"));
+
+        let inst_sel = crate::compat::tempo::traceql::parse_traceql(
+            r#"{ instrumentation.name = "otel-rust" }"#,
+        )
+        .unwrap();
+        let inst_sql =
+            trace_scan_sql(windowed(&empty, Some(&inst_sel), None, None, 10), None).expect("sql");
+        assert!(inst_sql
+            .as_str()
+            .contains("CAST(instrumentation_scope AS JSON)"));
+
+        let tags = BTreeMap::from([(String::from("exception.type"), String::from("Timeout"))]);
+        let tag_sql = trace_scan_sql(windowed(&tags, None, None, None, 10), None).expect("sql");
+        assert!(tag_sql.as_str().contains("events"));
+        assert!(tag_sql.as_str().contains("CAST(links AS JSON)"));
+
+        let lookup_sql = trace_scan_sql(
+            windowed(&empty, None, None, None, 10),
+            Some("0123456789abcdef0123456789abcdef"),
+        )
+        .expect("lookup sql");
+        let lookup_sql = lookup_sql.as_str();
+        assert!(!lookup_sql.contains("qualified_traces"));
+        assert!(lookup_sql.contains("events"));
+        assert!(lookup_sql.contains("CAST(links AS JSON)"));
+        assert!(lookup_sql.contains("CAST(instrumentation_scope AS JSON)"));
+    }
+
+    #[test]
+    fn tag_discovery_sql_applies_explicit_bounds_and_defaults_when_omitted() {
+        use crate::sql::assert_sql_has_otlp_time_predicates;
+
+        let bounded_names =
+            tag_names_map_keys_sql(Some(START_NS), Some(END_NS), 50).expect("bounded tag names");
+        assert_sql_has_otlp_time_predicates(bounded_names.as_str());
+        assert!(bounded_names.as_str().contains("2023-11-14"));
+
+        let bounded_events = tag_event_link_rows_sql(Some(START_NS), Some(END_NS), 50)
+            .expect("bounded event/link tags");
+        assert_sql_has_otlp_time_predicates(bounded_events.as_str());
+        assert!(bounded_events.as_str().contains("2023-11-14"));
+
+        let bounded_vals = tag_values_sql("http.method", Some(START_NS), Some(END_NS), 50)
+            .expect("bounded tag values");
+        assert_sql_has_otlp_time_predicates(bounded_vals.as_str());
+        assert!(!bounded_vals.as_str().contains("json_extract_string"));
+        assert!(bounded_vals.as_str().contains("attributes['http.method']"));
+
+        let default_names = tag_names_map_keys_sql(None, None, 50).expect("default tag names");
+        assert_sql_has_otlp_time_predicates(default_names.as_str());
+
+        let inverted = tag_names_map_keys_sql(Some(END_NS), Some(START_NS), 50).unwrap_err();
+        assert!(inverted.contains("`start` must be < `end`"));
     }
 
     #[test]
@@ -732,5 +1051,49 @@ mod tests {
         assert!(sql.contains("WHEN 'STATUS_CODE_ERROR' THEN 2"));
         assert!(sql.contains("WHEN 'error' THEN 2"));
         assert!(sql.contains(">= 2"));
+    }
+
+    #[test]
+    fn promoted_attributes_escaped_quotes_and_instrumentation_comparators_prune_cleanly() {
+        let empty = BTreeMap::new();
+
+        let quoted_sel = crate::compat::tempo::traceql::parse_traceql(
+            r#"{ name = "say 'resource_attributes' and 'events' now" }"#,
+        )
+        .unwrap();
+        let quoted_sql = trace_scan_sql(windowed(&empty, Some(&quoted_sel), None, None, 5), None)
+            .expect("quoted sql");
+        let filter_head = quoted_sql
+            .as_str()
+            .split("matching_traces AS")
+            .next()
+            .expect("filter_base section");
+        assert!(!filter_head.contains("resource_attributes"));
+        assert!(!filter_head.contains("events"));
+
+        let promo_sel = crate::compat::tempo::traceql::parse_traceql(
+            r#"{ span.sp.observation.type = "llm" && span.gen_ai.request.model = "gpt-4o" && span.gen_ai.provider.name = "openai" && span.sp.user.id = "u1" && span.sp.session.id = "s1" && .gen_ai.request.model = "gpt-4o" && .gen_ai.provider.name = "openai" && .sp.user.id = "u1" && .sp.agent.id = "a1" && .sp.agent.name = "bot" && resource.sp.agent.id = "a1" && resource.sp.agent.name = "bot" }"#,
+        )
+        .unwrap();
+        let promo_sql = trace_scan_sql(windowed(&empty, Some(&promo_sel), None, None, 5), None)
+            .expect("promo sql");
+        assert!(promo_sql.as_str().contains("model_name"));
+        assert!(promo_sql.as_str().contains("model_provider"));
+        assert!(promo_sql.as_str().contains("agent_id"));
+        assert!(promo_sql.as_str().contains("agent_name"));
+        assert!(!promo_sql.as_str().contains("json_extract_string"));
+
+        let inst_cmp = crate::compat::tempo::traceql::parse_traceql(
+            r#"{ instrumentation.version != "0" && instrumentation.version > "1" && instrumentation.version < "9" }"#,
+        )
+        .unwrap();
+        let inst_sql = trace_scan_sql(windowed(&empty, Some(&inst_cmp), None, None, 5), None)
+            .expect("inst sql");
+        let inst_head = inst_sql
+            .as_str()
+            .split("matching_traces AS")
+            .next()
+            .expect("filter_base section");
+        assert!(inst_head.contains("instrumentation_scope"));
     }
 }

@@ -1,26 +1,8 @@
 WITH filter_base AS (
     SELECT
         trace_id,
-        span_id,
-        message_type,
-        span_kind,
-        app_id,
-        agent_id,
-        agent_name,
-        session_id,
         CAST(epoch_ns(timestamp) AS BIGINT) AS start_time_unix_nano,
-        CAST(epoch_ns(end_timestamp) AS BIGINT) AS end_time_unix_nano,
-        attributes,
-        resource_attributes,
-        instrumentation_scope,
-        status_code,
-        status_message,
-        observation_type,
-        model_name,
-        model_provider,
-        user_id,
-        session_attr_id,
-        service_name
+        CAST(epoch_ns(end_timestamp) AS BIGINT) AS end_time_unix_nano{{filter_extra_columns}}
     FROM traces
     WHERE {{trace_id_prefix}}{{timestamp_filter}}{{default_observation_filter}}
 ),
@@ -30,12 +12,13 @@ matching_traces AS (
     WHERE {{row_predicate}}
 ),
 qualified_traces AS (
-    SELECT filter_base.trace_id
-    FROM filter_base
-    INNER JOIN matching_traces USING (trace_id)
-    GROUP BY filter_base.trace_id
+    SELECT trace_id
+    FROM traces
+    WHERE {{trace_id_prefix}}{{timestamp_filter}}{{default_observation_filter}}
+      AND trace_id IN (SELECT trace_id FROM matching_traces)
+    GROUP BY trace_id
     HAVING {{duration_predicate}}
-    ORDER BY MIN(filter_base.start_time_unix_nano) DESC, filter_base.trace_id DESC
+    ORDER BY MIN(CAST(epoch_ns(timestamp) AS BIGINT)) DESC, trace_id DESC
     LIMIT {{trace_limit}}
 )
 SELECT
