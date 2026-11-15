@@ -561,4 +561,19 @@ mod tests {
             .expect_err("fractional numeric predicate");
         assert_eq!(err.code, CompatErrorCode::BadRequest);
     }
+
+    #[test]
+    fn parses_unscoped_leading_dot_attributes() {
+        parse_traceql(
+            r#"{ .gen_ai.conversation.id = "ses_99b9e24c-329b-4421-8d8c-1faf7ca121c8" && .http.request.method = "POST" }"#,
+        )
+        .expect("leading-dot unscoped attributes should parse");
+
+        let err = parse_traceql(r#"{ . = "x" }"#).expect_err("empty leading-dot field");
+        assert_eq!(err.code, CompatErrorCode::BadRequest);
+
+        let err = parse_traceql(r#"{ .http.status_code >= "slow" }"#)
+            .expect_err("non-numeric value for unscoped numeric status code");
+        assert_eq!(err.code, CompatErrorCode::BadRequest);
+    }
 }
