@@ -13,6 +13,7 @@ pub enum TraceField {
     Resource(String),
     Instrumentation(String),
     Intrinsic(String),
+    Unscoped(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -180,6 +181,12 @@ impl<'a> Parser<'a> {
         }
         if raw.starts_with("event.") || raw.starts_with("link.") {
             return Err(unsupported(format!("TraceQL field '{raw}' is unsupported")));
+        }
+        if let Some(field) = raw.strip_prefix('.') {
+            if field.is_empty() {
+                return Err(bad("TraceQL field is required"));
+            }
+            return Ok(TraceField::Unscoped(field.to_string()));
         }
         if matches!(
             raw.as_str(),
@@ -394,7 +401,7 @@ pub fn is_status_field(field: &TraceField) -> bool {
                 | "span:status_code"
                 | "span.status_code"
         ),
-        TraceField::Resource(_) | TraceField::Instrumentation(_) => false,
+        TraceField::Resource(_) | TraceField::Instrumentation(_) | TraceField::Unscoped(_) => false,
     }
 }
 
@@ -413,7 +420,7 @@ pub fn canonical_status_code(value: &str) -> Option<i64> {
 
 pub fn is_numeric_field(field: &TraceField) -> bool {
     match field {
-        TraceField::Span(key) => matches!(
+        TraceField::Span(key) | TraceField::Unscoped(key) => matches!(
             key.as_str(),
             "http.status_code" | "http.response.status_code"
         ),

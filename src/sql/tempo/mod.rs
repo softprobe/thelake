@@ -27,6 +27,9 @@ pub(crate) const PERSISTED_OTLP_STATUS_CODES: [(&str, i64); 12] = [
 /// Long enough to cover Tempo query fixture timestamps (~2023) under CI "now".
 /// Still a finite [`QueryWindow`] — never an unbounded lake scan.
 const TEMPO_DEFAULT_LOOKBACK_NS: i64 = 10 * 365 * 24 * 60 * 60 * 1_000_000_000;
+const TAG_NAMES_MAP_KEYS_SQL: &str = include_str!("tag_names_map_keys.sql");
+const TAG_EVENT_LINK_ROWS_SQL: &str = include_str!("tag_event_link_rows.sql");
+const TAG_VALUES_SQL: &str = include_str!("tag_values.sql");
 
 /// Inputs for a Tempo lake scan (protocol adapters map request types here).
 #[derive(Debug, Clone, Copy)]
@@ -89,6 +92,50 @@ pub(crate) fn trace_scan_sql(
     trace_id: Option<&str>,
 ) -> Result<TrustedSql, String> {
     let sql = compile_trace_scan_sql(params, trace_id)?;
+    approved_query(sql).map_err(|error| error.to_string())
+}
+
+pub(crate) fn tag_names_map_keys_sql(limit: usize) -> Result<TrustedSql, String> {
+    let (start_ns, end_ns) = resolve_tempo_scan_window(None, None)?;
+    let window = query_window_from_exclusive_ns(start_ns, end_ns)?;
+    let limit = limit.max(1);
+    let sql = window
+        .scan_with_timestamp_filter("", |bound| {
+            TAG_NAMES_MAP_KEYS_SQL
+                .replace("{{timestamp_filter}}", bound)
+                .replace("{{limit}}", &limit.to_string())
+        })
+        .into_sql();
+    approved_query(sql).map_err(|error| error.to_string())
+}
+
+pub(crate) fn tag_event_link_rows_sql(limit: usize) -> Result<TrustedSql, String> {
+    let (start_ns, end_ns) = resolve_tempo_scan_window(None, None)?;
+    let window = query_window_from_exclusive_ns(start_ns, end_ns)?;
+    let limit = limit.max(1);
+    let sql = window
+        .scan_with_timestamp_filter("", |bound| {
+            TAG_EVENT_LINK_ROWS_SQL
+                .replace("{{timestamp_filter}}", bound)
+                .replace("{{limit}}", &limit.to_string())
+        })
+        .into_sql();
+    approved_query(sql).map_err(|error| error.to_string())
+}
+
+pub(crate) fn tag_values_sql(tag: &str, limit: usize) -> Result<TrustedSql, String> {
+    let (start_ns, end_ns) = resolve_tempo_scan_window(None, None)?;
+    let window = query_window_from_exclusive_ns(start_ns, end_ns)?;
+    let limit = limit.max(1);
+    let tag_expr = tag_value_sql(tag);
+    let sql = window
+        .scan_with_timestamp_filter("", |bound| {
+            TAG_VALUES_SQL
+                .replace("{{timestamp_filter}}", bound)
+                .replace("{{tag_expr}}", &tag_expr)
+                .replace("{{limit}}", &limit.to_string())
+        })
+        .into_sql();
     approved_query(sql).map_err(|error| error.to_string())
 }
 
@@ -294,7 +341,7 @@ fn predicate_sql(predicate: &crate::compat::tempo::traceql::TracePredicate) -> S
     };
     let actual = match field {
         TraceField::Span(key) if key == "status_code" || key == "status" => span_status_code_sql(),
-        TraceField::Span(key) => span_attribute_value(key),
+        TraceField::Span(key) | TraceField::Unscoped(key) => span_attribute_value(key),
         TraceField::Resource(key) => {
             if key == "service.name" {
                 promoted_attr_expr("service.name").expect("service.name mapping")
