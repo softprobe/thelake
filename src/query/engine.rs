@@ -7,8 +7,8 @@ use crate::storage::duckdb::cache::CacheSettings;
 #[cfg(test)]
 use crate::storage::ducklake::PhysicalScope;
 use crate::storage::ducklake::{
-    ducklake_qualified_table_name, CatalogPool, DuckLakeAccess, QueryCaller, QuerySession,
-    QuerySlot, WorkspaceBinding, WorkspaceScopeMode,
+    ducklake_qualified_table_name, CatalogPool, DuckLakeAccess, QueryCaller, QueryCancelToken,
+    QuerySession, QuerySlot, WorkspaceBinding, WorkspaceScopeMode, QUERY_CANCELLED_MESSAGE,
 };
 use crate::workspace_scope::{SharedScopeError, SharedScopeErrorCode};
 use anyhow::{anyhow, Result};
@@ -48,7 +48,16 @@ pub struct QueryEngine {
 }
 
 type InflightWaiters = Vec<oneshot::Sender<Result<QueryResult>>>;
-type InflightMap = HashMap<u64, InflightWaiters>;
+type InflightKey = (u64, String);
+
+struct InflightEntry {
+    subscribers: usize,
+    completed: bool,
+    waiters: InflightWaiters,
+    cancel_token: QueryCancelToken,
+}
+
+type InflightMap = HashMap<InflightKey, Arc<Mutex<InflightEntry>>>;
 
 struct QueryEngineInner {
     pool: Arc<CatalogPool>,
@@ -381,52 +390,164 @@ fn sql_coalesce_key(sql: &str) -> u64 {
     hasher.finish()
 }
 
-/// Drops the in-flight key if the leader is cancelled (compat backends wrap
-/// `execute_query` in `tokio::time::timeout`). Without this, waiters hang until restart.
-struct InflightLease {
-    inflight: Arc<Mutex<InflightMap>>,
-    key: u64,
+fn lock_inflight_map(inflight: &Mutex<InflightMap>) -> std::sync::MutexGuard<'_, InflightMap> {
+    inflight.lock().unwrap_or_else(|p| p.into_inner())
+}
+
+fn lock_inflight_entry(entry: &Mutex<InflightEntry>) -> std::sync::MutexGuard<'_, InflightEntry> {
+    entry.lock().unwrap_or_else(|p| p.into_inner())
+}
+
+struct CancelOnDrop {
+    token: QueryCancelToken,
     armed: bool,
 }
 
-impl InflightLease {
-    fn lock_map(inflight: &Mutex<InflightMap>) -> std::sync::MutexGuard<'_, InflightMap> {
-        inflight.lock().unwrap_or_else(|p| p.into_inner())
+impl CancelOnDrop {
+    fn new(token: QueryCancelToken) -> Self {
+        Self { token, armed: true }
     }
 
-    fn take_waiters(&mut self) -> InflightWaiters {
+    fn disarm(&mut self) {
         self.armed = false;
-        Self::lock_map(&self.inflight)
-            .remove(&self.key)
-            .unwrap_or_default()
     }
+}
 
-    fn complete(mut self, result: &Result<QueryResult>) {
-        let waiters = self.take_waiters();
-        match result {
-            Ok(rows) => {
-                for waiter in waiters {
-                    let _ = waiter.send(Ok(rows.clone()));
-                }
-            }
-            Err(err) => {
-                let msg = err.to_string();
-                for waiter in waiters {
-                    let _ = waiter.send(Err(anyhow!(msg.clone())));
-                }
-            }
+impl Drop for CancelOnDrop {
+    fn drop(&mut self) {
+        if self.armed {
+            self.token.cancel();
         }
     }
 }
 
-impl Drop for InflightLease {
+/// Decrements active subscriber count on caller drop; interrupts DuckDB only
+/// when the last awaiting subscriber for this coalesced query disappears.
+struct SubscriberGuard {
+    inflight: Arc<Mutex<InflightMap>>,
+    key: InflightKey,
+    entry: Arc<Mutex<InflightEntry>>,
+    cancel_token: QueryCancelToken,
+    armed: bool,
+}
+
+impl SubscriberGuard {
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for SubscriberGuard {
     fn drop(&mut self) {
         if !self.armed {
             return;
         }
-        let waiters = self.take_waiters();
+        let should_cancel = {
+            let mut st = lock_inflight_entry(&self.entry);
+            if st.completed {
+                false
+            } else {
+                st.subscribers = st.subscribers.saturating_sub(1);
+                if st.subscribers == 0 {
+                    st.completed = true;
+                    st.waiters.clear();
+                    true
+                } else {
+                    false
+                }
+            }
+        };
+        if should_cancel {
+            {
+                let mut map = lock_inflight_map(&self.inflight);
+                if map
+                    .get(&self.key)
+                    .is_some_and(|cur| Arc::ptr_eq(cur, &self.entry))
+                {
+                    map.remove(&self.key);
+                }
+            }
+            self.cancel_token.cancel();
+        }
+    }
+}
+
+struct InflightLeaderGuard {
+    inflight: Arc<Mutex<InflightMap>>,
+    key: InflightKey,
+    entry: Arc<Mutex<InflightEntry>>,
+    cancel_token: QueryCancelToken,
+    armed: bool,
+}
+
+impl InflightLeaderGuard {
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for InflightLeaderGuard {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        {
+            let mut map = lock_inflight_map(&self.inflight);
+            if map
+                .get(&self.key)
+                .is_some_and(|cur| Arc::ptr_eq(cur, &self.entry))
+            {
+                map.remove(&self.key);
+            }
+        }
+        let waiters = {
+            let mut st = lock_inflight_entry(&self.entry);
+            st.completed = true;
+            std::mem::take(&mut st.waiters)
+        };
+        self.cancel_token.cancel();
         for waiter in waiters {
-            let _ = waiter.send(Err(anyhow!("DuckDB in-flight leader cancelled")));
+            let _ = waiter.send(Err(anyhow!("query leader task terminated unexpectedly")));
+        }
+    }
+}
+
+fn clone_error_preserving_chain(err: &anyhow::Error) -> anyhow::Error {
+    let chain: Vec<String> = err.chain().map(ToString::to_string).collect();
+    let mut iter = chain.into_iter().rev();
+    let mut out = anyhow!(iter
+        .next()
+        .unwrap_or_else(|| "query execution failed".to_string()));
+    for ctx in iter {
+        out = out.context(ctx);
+    }
+    out
+}
+
+fn fan_out_inflight_result(
+    mut waiters: Vec<tokio::sync::oneshot::Sender<Result<QueryResult>>>,
+    result: Result<QueryResult>,
+) {
+    match result {
+        Ok(rows) => {
+            if waiters.len() > 1 {
+                for waiter in waiters.drain(..waiters.len() - 1) {
+                    let _ = waiter.send(Ok(rows.clone()));
+                }
+            }
+            if let Some(last) = waiters.pop() {
+                let _ = last.send(Ok(rows));
+            }
+        }
+        Err(err) => {
+            if waiters.len() > 1 {
+                for waiter in waiters.drain(..waiters.len() - 1) {
+                    let _ = waiter.send(Err(clone_error_preserving_chain(&err)));
+                }
+            }
+            if let Some(last) = waiters.pop() {
+                let _ = last.send(Err(err));
+            }
         }
     }
 }
@@ -442,7 +563,7 @@ impl QueryEngineInner {
     }
 
     pub(crate) async fn execute_trusted(
-        &self,
+        self: &Arc<Self>,
         query: crate::sql::trusted::TrustedSql,
     ) -> Result<QueryResult> {
         let scope = self.core.access.physical_scope();
@@ -452,46 +573,109 @@ impl QueryEngineInner {
         self.execute_query(query.as_str()).await
     }
 
-    /// Execute arbitrary SQL query and return results as JSON
-    /// Used by Grafana SQL API endpoint
-    pub(crate) async fn execute_query(&self, query: &str) -> Result<QueryResult> {
-        let key = sql_coalesce_key(query);
-        // Guard must drop before any `.await` — `std::sync::MutexGuard` is `!Send`.
-        let waiter = {
-            let mut pending = InflightLease::lock_map(&self.inflight);
-            if let Some(waiters) = pending.get_mut(&key) {
-                let (tx, rx) = oneshot::channel();
-                waiters.push(tx);
-                Some(rx)
+    pub(crate) async fn execute_query(self: &Arc<Self>, query: &str) -> Result<QueryResult> {
+        if sql_is_ducklake_mutating(query) {
+            let cancel_token = QueryCancelToken::new();
+            let mut drop_guard = CancelOnDrop::new(cancel_token.clone());
+            let result = self.dispatch_query(query, cancel_token).await;
+            drop_guard.disarm();
+            return result;
+        }
+
+        let key = (sql_coalesce_key(query), query.to_string());
+        let (entry, rx, cancel_token, is_leader) = {
+            let mut pending = lock_inflight_map(&self.inflight);
+            let mut joined = None;
+            if let Some(existing) = pending.get(&key).cloned() {
+                let mut st = lock_inflight_entry(&existing);
+                if !st.completed {
+                    let (tx, rx) = oneshot::channel();
+                    st.subscribers += 1;
+                    st.waiters.push(tx);
+                    let tok = st.cancel_token.clone();
+                    drop(st);
+                    joined = Some((existing, rx, tok, false));
+                }
+            }
+            if let Some(found) = joined {
+                found
             } else {
-                pending.insert(key, Vec::new());
-                None
+                let (tx, rx) = oneshot::channel();
+                let cancel_token = QueryCancelToken::new();
+                let entry = Arc::new(Mutex::new(InflightEntry {
+                    subscribers: 1,
+                    completed: false,
+                    waiters: vec![tx],
+                    cancel_token: cancel_token.clone(),
+                }));
+                pending.insert(key.clone(), Arc::clone(&entry));
+                (entry, rx, cancel_token, true)
             }
         };
-        if let Some(rx) = waiter {
-            return rx
-                .await
-                .map_err(|_| anyhow!("DuckDB in-flight coalesced waiter dropped"))?;
+
+        if is_leader {
+            let inner = Arc::clone(self);
+            let sql_owned = query.to_string();
+            let leader_key = key.clone();
+            let leader_entry = Arc::clone(&entry);
+            let leader_token = cancel_token.clone();
+            tokio::spawn(async move {
+                let mut leader_guard = InflightLeaderGuard {
+                    inflight: Arc::clone(&inner.inflight),
+                    key: leader_key.clone(),
+                    entry: Arc::clone(&leader_entry),
+                    cancel_token: leader_token.clone(),
+                    armed: true,
+                };
+                let result = inner.dispatch_query(&sql_owned, leader_token).await;
+                {
+                    let mut map = lock_inflight_map(&inner.inflight);
+                    if map
+                        .get(&leader_key)
+                        .is_some_and(|cur| Arc::ptr_eq(cur, &leader_entry))
+                    {
+                        map.remove(&leader_key);
+                    }
+                }
+                let waiters = {
+                    let mut st = lock_inflight_entry(&leader_entry);
+                    st.completed = true;
+                    std::mem::take(&mut st.waiters)
+                };
+                leader_guard.disarm();
+                fan_out_inflight_result(waiters, result);
+            });
         }
-        let lease = InflightLease {
+
+        let mut sub_guard = SubscriberGuard {
             inflight: Arc::clone(&self.inflight),
             key,
+            entry,
+            cancel_token,
             armed: true,
         };
-        let result = self.dispatch_query(query).await;
-        lease.complete(&result);
-        result
+        let received = rx.await.map_err(|_| anyhow!(QUERY_CANCELLED_MESSAGE))?;
+        sub_guard.disarm();
+        received
     }
 
-    async fn dispatch_query(&self, query: &str) -> Result<QueryResult> {
+    async fn dispatch_query(
+        &self,
+        query: &str,
+        cancel_token: QueryCancelToken,
+    ) -> Result<QueryResult> {
         let enqueued_at = std::time::Instant::now();
         let core = Arc::clone(&self.core);
         let sql = query.to_string();
         let response = self
             .pool
-            .with_query(&self.core.workspace_id, move |slot, caller| {
-                run_query_job(&core, slot, caller, &sql, enqueued_at)
-            })
+            .with_query(
+                &self.core.workspace_id,
+                cancel_token,
+                move |slot, caller, token| {
+                    run_query_job(&core, slot, caller, &sql, enqueued_at, token)
+                },
+            )
             .await?;
         let elapsed = response.queue_wait + response.exec_elapsed;
         if elapsed >= std::time::Duration::from_millis(200) {
@@ -527,13 +711,22 @@ impl QueryEngineInner {
     ) -> Result<Vec<Result<QueryResult>>> {
         let core = Arc::clone(&self.core);
         let sqls: Vec<String> = queries.iter().map(|s| (*s).to_string()).collect();
-        self.pool
-            .with_query(&self.core.workspace_id, move |slot, _| {
-                sqls.iter()
-                    .map(|sql| core.execute_on_slot(slot, sql).result)
-                    .collect()
-            })
-            .await
+        let cancel_token = QueryCancelToken::new();
+        let mut drop_guard = CancelOnDrop::new(cancel_token.clone());
+        let out = self
+            .pool
+            .with_query(
+                &self.core.workspace_id,
+                cancel_token,
+                move |slot, _, token| {
+                    sqls.iter()
+                        .map(|sql| core.execute_on_slot_cancellable(slot, sql, token).result)
+                        .collect()
+                },
+            )
+            .await;
+        drop_guard.disarm();
+        out
     }
 }
 
@@ -545,7 +738,17 @@ fn run_query_job(
     caller: &QueryCaller,
     sql: &str,
     enqueued_at: std::time::Instant,
+    cancel_token: &QueryCancelToken,
 ) -> QueryWorkerResponse {
+    if cancel_token.is_cancelled() {
+        return QueryWorkerResponse {
+            result: Err(anyhow!(QUERY_CANCELLED_MESSAGE)),
+            queue_wait: enqueued_at.elapsed(),
+            exec_elapsed: std::time::Duration::ZERO,
+            gate_elapsed: std::time::Duration::ZERO,
+            run_elapsed: std::time::Duration::ZERO,
+        };
+    }
     let queue_wait = enqueued_at.elapsed();
     let sql_kind = crate::self_monitoring::classify_sql_kind(sql);
     if core.counts_toward_liveness {
@@ -553,7 +756,7 @@ fn run_query_job(
     }
     crate::self_monitoring::gauge_store::QUERY_WORKERS_BUSY.fetch_add(1, Ordering::Relaxed);
     let exec_start = std::time::Instant::now();
-    let mut timed = core.execute_on_slot(slot, sql);
+    let mut timed = core.execute_on_slot_cancellable(slot, sql, cancel_token);
     let mut result = timed.result;
     let mut gate_elapsed = timed.gate_elapsed;
     let mut run_elapsed = timed.run_elapsed;
@@ -563,8 +766,11 @@ fn run_query_job(
             // This slot's in-memory database is dead; every future statement
             // would fail with the same FATAL error. Rebuild before touching
             // the next request.
-            if recover_slot(core, slot, caller) && kind == Poison::Collateral {
-                timed = core.execute_on_slot(slot, sql);
+            if recover_slot(core, slot, caller)
+                && kind == Poison::Collateral
+                && !cancel_token.is_cancelled()
+            {
+                timed = core.execute_on_slot_cancellable(slot, sql, cancel_token);
                 result = timed.result;
                 gate_elapsed = timed.gate_elapsed;
                 run_elapsed = timed.run_elapsed;
@@ -884,9 +1090,14 @@ fn map_attributes_row(result: &QueryResult) -> Option<Value> {
 }
 
 impl DuckDBCore {
-    fn execute_on_slot(&self, slot: &mut QuerySlot, query: &str) -> TimedExecute {
+    fn execute_on_slot_cancellable(
+        &self,
+        slot: &mut QuerySlot,
+        query: &str,
+        cancel_token: &QueryCancelToken,
+    ) -> TimedExecute {
         match slot.session() {
-            Ok(session) => self.execute_query_on_state(session, query),
+            Ok(session) => self.execute_query_on_state_cancellable(session, query, cancel_token),
             Err(err) => TimedExecute {
                 result: Err(err),
                 gate_elapsed: std::time::Duration::ZERO,
@@ -895,20 +1106,53 @@ impl DuckDBCore {
         }
     }
 
+    #[cfg(test)]
     fn execute_query_on_state(&self, state: &mut QuerySession, query: &str) -> TimedExecute {
+        let token = QueryCancelToken::new();
+        self.execute_query_on_state_cancellable(state, query, &token)
+    }
+
+    fn execute_query_on_state_cancellable(
+        &self,
+        state: &mut QuerySession,
+        query: &str,
+        cancel_token: &QueryCancelToken,
+    ) -> TimedExecute {
         // Catalog visibility: Postgres metadata is visible without reconnect.
         // is handled by DuckLake (WAL + busy timeout / ATTACH behavior). Softprobe does not
         // reattach or mem::forget connections after writes.
 
         let query_run = self.ducklake_inline_sql(query);
+        let is_mutating =
+            sql_needs_softprobe_txn_wrap(&query_run) || sql_is_ducklake_mutating(&query_run);
+        let _interrupt_guard = if !is_mutating {
+            match cancel_token.bind_interrupt(Arc::clone(&state.interrupt_handle)) {
+                Ok(guard) => Some(guard),
+                Err(err) => {
+                    return TimedExecute {
+                        result: Err(err),
+                        gate_elapsed: std::time::Duration::ZERO,
+                        run_elapsed: std::time::Duration::ZERO,
+                    };
+                }
+            }
+        } else {
+            None
+        };
+
         // Optional query-worker fact-scan gate (`query.sql_gate`, default off).
         let gate_start = std::time::Instant::now();
         if self.config.query.sql_gate {
             if let Err(e) =
                 crate::sql::ensure_fact_scan_uses_timestamp_pruning(&state.conn, &query_run)
             {
+                let err = if cancel_token.is_cancelled() {
+                    anyhow!(QUERY_CANCELLED_MESSAGE)
+                } else {
+                    anyhow!("SQL gate: {e}")
+                };
                 return TimedExecute {
-                    result: Err(anyhow!("SQL gate: {e}")),
+                    result: Err(err),
                     gate_elapsed: gate_start.elapsed(),
                     run_elapsed: std::time::Duration::ZERO,
                 };
@@ -971,6 +1215,9 @@ impl DuckDBCore {
         }
 
         let run_once = |state: &mut QuerySession| -> Result<QueryResult> {
+            if cancel_token.is_cancelled() {
+                return Err(anyhow!(QUERY_CANCELLED_MESSAGE));
+            }
             let query_start = std::time::Instant::now();
             state.try_wrap_cache_httpfs_filesystems(&self.cache);
             // duckdb-rs requires Statement for multi-row fetch. Preparing the
@@ -991,6 +1238,9 @@ impl DuckDBCore {
 
             let mut rows = Vec::new();
             while let Some(row) = query_rows.next()? {
+                if rows.len() % 256 == 0 && cancel_token.is_cancelled() {
+                    return Err(anyhow!(QUERY_CANCELLED_MESSAGE));
+                }
                 let mut values = Vec::with_capacity(column_names.len());
                 for idx in 0..column_names.len() {
                     let value: DuckValue = row.get(idx)?;
@@ -1015,7 +1265,9 @@ impl DuckDBCore {
             Ok(result) => Ok(result),
             Err(err) => {
                 let message = err.to_string();
-                if message.contains("No snapshot found in DuckLake") {
+                if cancel_token.is_cancelled() || message.starts_with("Interrupt Error") {
+                    Err(anyhow!(QUERY_CANCELLED_MESSAGE))
+                } else if message.contains("No snapshot found in DuckLake") {
                     warn!(
                         "DuckLake snapshot not visible yet; retrying query once: {}",
                         message
@@ -1142,9 +1394,7 @@ mod tests {
 
     use crate::storage::ducklake::workspace_views;
     use duckdb::Connection;
-    use std::collections::HashMap;
-    use std::sync::{Arc, Mutex};
-    use tokio::sync::oneshot;
+    use std::sync::Arc;
 
     #[test]
     fn replace_standalone_ident_rewrites_bare_traces() {
@@ -1638,44 +1888,293 @@ mod tests {
         assert_ne!(a, c);
     }
 
+    #[test]
+    fn poison_kind_ignores_duckdb_interrupt_error() {
+        assert_eq!(poison_kind("Interrupt Error: Interrupted!"), Poison::None);
+    }
+
+    async fn open_single_slot_test_engine(
+        mode: WorkspaceScopeMode,
+    ) -> (QueryEngine, Arc<CatalogPool>, tempfile::TempDir) {
+        let temp = tempfile::TempDir::new().expect("tempdir");
+        let mut cfg = crate::test_support::file_backed_test_config(&temp);
+        cfg.ducklake.workspace_scope_mode = mode;
+        cfg.query.max_connections = 1;
+        let scope = PhysicalScope::from_ducklake(&cfg.ducklake);
+        let pool = CatalogPool::open(&cfg, &scope, None)
+            .await
+            .expect("open single-slot pool");
+        let engine =
+            QueryEngine::bind(Arc::clone(&pool), "ws-cancel-test", true).expect("bind engine");
+        (engine, pool, temp)
+    }
+
     #[tokio::test]
-    async fn cancelled_leader_releases_inflight_waiters() {
-        let inflight = Arc::new(Mutex::new(HashMap::new()));
-        let key = 7u64;
-        {
-            let mut pending = InflightLease::lock_map(&inflight);
-            pending.insert(key, Vec::new());
+    async fn dropping_query_future_interrupts_active_duckdb_scan_and_preserves_slot_health() {
+        for mode in [WorkspaceScopeMode::Isolated, WorkspaceScopeMode::Shared] {
+            let (engine, _pool, _temp) = open_single_slot_test_engine(mode).await;
+            let heal_before = self_heal_snapshot();
+
+            let slow_sql = crate::sql::trusted::approved_query(
+                "SELECT sum(hash(i, j)) AS s FROM range(25000) t1(i), range(25000) t2(j)",
+            )
+            .expect("trusted slow sql");
+            let timed_out = tokio::time::timeout(
+                std::time::Duration::from_millis(80),
+                engine.execute_trusted(slow_sql),
+            )
+            .await;
+            assert!(
+                timed_out.is_err(),
+                "625M-row hash cross join must still be running at 80ms"
+            );
+
+            let followup_start = std::time::Instant::now();
+            let fast_sql =
+                crate::sql::trusted::approved_query("SELECT 42 AS answer").expect("fast sql");
+            let followup = engine
+                .execute_trusted(fast_sql)
+                .await
+                .expect("follow-up query on interrupted slot must succeed");
+            let followup_elapsed = followup_start.elapsed();
+            assert_eq!(followup.rows, vec![vec![serde_json::json!(42)]]);
+            assert!(
+                followup_elapsed < std::time::Duration::from_millis(400),
+                "interrupted slot must release promptly in {mode:?}, took {followup_elapsed:?}"
+            );
+
+            let heal_after = self_heal_snapshot();
+            assert_eq!(
+                heal_after.rebuilds, heal_before.rebuilds,
+                "interrupt must not trigger self-heal rebuild in {mode:?}"
+            );
+            assert_eq!(heal_after.consecutive_failures, 0);
         }
-        let (tx, rx) = oneshot::channel();
-        {
-            let mut pending = InflightLease::lock_map(&inflight);
-            pending.get_mut(&key).expect("leader").push(tx);
-        }
-        drop(InflightLease {
-            inflight: inflight.clone(),
-            key,
-            armed: true,
+    }
+
+    #[tokio::test]
+    async fn dropping_queued_query_skips_execution_when_slot_becomes_free() {
+        let (engine, _pool, _temp) =
+            open_single_slot_test_engine(WorkspaceScopeMode::Isolated).await;
+
+        let holder_engine = engine.clone();
+        let holder = tokio::spawn(async move {
+            let medium_sql = crate::sql::trusted::approved_query(
+                "SELECT sum(hash(i, j)) AS s FROM range(4000) t1(i), range(4000) t2(j)",
+            )
+            .expect("medium sql");
+            holder_engine.execute_trusted(medium_sql).await
         });
-        let notified = rx.await.expect("waiter notified");
+
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+        let queued_slow = crate::sql::trusted::approved_query(
+            "SELECT sum(hash(i, j)) AS s FROM range(25000) t1(i), range(25000) t2(j)",
+        )
+        .expect("queued slow sql");
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_millis(25),
+            engine.execute_trusted(queued_slow),
+        )
+        .await;
+
+        holder.await.expect("join holder").expect("holder succeeds");
+
+        let followup_start = std::time::Instant::now();
+        let fast_sql = crate::sql::trusted::approved_query("SELECT 7 AS v").expect("fast sql");
+        let res = engine.execute_trusted(fast_sql).await.expect("fast query");
+        let followup_elapsed = followup_start.elapsed();
+        assert_eq!(res.rows, vec![vec![serde_json::json!(7)]]);
         assert!(
-            notified
+            followup_elapsed < std::time::Duration::from_millis(250),
+            "dropped queued query must not execute after holder finishes, took {followup_elapsed:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn coalesced_inflight_query_survives_single_subscriber_drop_and_cancels_when_all_drop() {
+        let (engine, _pool, _temp) = open_single_slot_test_engine(WorkspaceScopeMode::Shared).await;
+
+        let shared_medium =
+            "SELECT count(*) AS c FROM range(3500) t1(i), range(3500) t2(j) WHERE hash(i, j) > 0";
+        let e1 = engine.clone();
+        let sub1 = tokio::spawn(async move {
+            let q = crate::sql::trusted::approved_query(shared_medium).unwrap();
+            tokio::time::timeout(std::time::Duration::from_millis(25), e1.execute_trusted(q)).await
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        let e2 = engine.clone();
+        let sub2 = tokio::spawn(async move {
+            let q = crate::sql::trusted::approved_query(shared_medium).unwrap();
+            e2.execute_trusted(q).await
+        });
+
+        let sub1_res = sub1.await.expect("sub1 join");
+        assert!(sub1_res.is_err(), "sub1 should drop via timeout at 25ms");
+        let sub2_res = sub2
+            .await
+            .expect("sub2 join")
+            .expect("remaining subscriber must still receive query result when leader drops");
+        assert_eq!(sub2_res.row_count, 1);
+
+        let shared_slow = "SELECT sum(hash(i, j)) AS s FROM range(25000) t1(i), range(25000) t2(j)";
+        let e3 = engine.clone();
+        let s1 = tokio::spawn(async move {
+            let q = crate::sql::trusted::approved_query(shared_slow).unwrap();
+            tokio::time::timeout(std::time::Duration::from_millis(35), e3.execute_trusted(q)).await
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        let e4 = engine.clone();
+        let s2 = tokio::spawn(async move {
+            let q = crate::sql::trusted::approved_query(shared_slow).unwrap();
+            tokio::time::timeout(std::time::Duration::from_millis(60), e4.execute_trusted(q)).await
+        });
+        assert!(s1.await.unwrap().is_err());
+        assert!(s2.await.unwrap().is_err());
+
+        let followup_start = std::time::Instant::now();
+        let fast_sql = crate::sql::trusted::approved_query("SELECT 99 AS v").unwrap();
+        let followup = engine.execute_trusted(fast_sql).await.expect("followup");
+        let followup_elapsed = followup_start.elapsed();
+        assert_eq!(followup.rows, vec![vec![serde_json::json!(99)]]);
+        assert!(
+            followup_elapsed < std::time::Duration::from_millis(400),
+            "once all coalesced subscribers drop, DuckDB must interrupt promptly; took {followup_elapsed:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn queued_cancel_before_slot_bind_marks_token_done_on_drop() {
+        let (_engine, pool, _temp) = open_single_slot_test_engine(WorkspaceScopeMode::Shared).await;
+
+        let (slot_entered_tx, slot_entered_rx) = tokio::sync::oneshot::channel();
+        let (release_slot_tx, release_slot_rx) = std::sync::mpsc::channel();
+        let holder_pool = Arc::clone(&pool);
+        let holder = tokio::spawn(async move {
+            holder_pool
+                .with_query(
+                    "ws-holder",
+                    QueryCancelToken::new(),
+                    move |_slot, _caller, _tok| {
+                        let _ = slot_entered_tx.send(());
+                        let _ = release_slot_rx.recv();
+                        Ok::<_, anyhow::Error>(())
+                    },
+                )
+                .await
+        });
+
+        slot_entered_rx.await.expect("holder entered single slot");
+
+        let queued_token = QueryCancelToken::new();
+        let mut queued_fut = Box::pin(pool.with_query(
+            "ws-queued",
+            queued_token.clone(),
+            |_slot, _caller, _tok| Ok::<_, anyhow::Error>(()),
+        ));
+
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(15), &mut queued_fut)
+                .await
+                .is_err(),
+            "second query must wait while single slot is occupied"
+        );
+
+        queued_token.cancel();
+        assert!(queued_token.is_cancelled());
+        assert!(!queued_token.is_done());
+
+        drop(queued_fut);
+        assert!(
+            queued_token.is_done(),
+            "dropping a queued with_query future before checkout must mark its cancel token done"
+        );
+
+        let _ = release_slot_tx.send(());
+        holder
+            .await
+            .expect("join holder")
+            .expect("with_query")
+            .expect("job");
+    }
+
+    #[test]
+    fn inflight_leader_guard_cleans_up_map_and_notifies_waiters_on_abort() {
+        let inflight: Arc<Mutex<InflightMap>> = Arc::new(Mutex::new(HashMap::new()));
+        let key: InflightKey = (sql_coalesce_key("SELECT 1"), "SELECT 1".to_string());
+        let (tx1, mut rx1) = oneshot::channel();
+        let (tx2, mut rx2) = oneshot::channel();
+        let cancel_token = QueryCancelToken::new();
+        let entry = Arc::new(Mutex::new(InflightEntry {
+            subscribers: 2,
+            completed: false,
+            waiters: vec![tx1, tx2],
+            cancel_token: cancel_token.clone(),
+        }));
+        lock_inflight_map(&inflight).insert(key.clone(), Arc::clone(&entry));
+
+        {
+            let _guard = InflightLeaderGuard {
+                inflight: Arc::clone(&inflight),
+                key: key.clone(),
+                entry: Arc::clone(&entry),
+                cancel_token: cancel_token.clone(),
+                armed: true,
+            };
+        }
+
+        assert!(
+            !lock_inflight_map(&inflight).contains_key(&key),
+            "aborted leader guard must remove inflight map entry"
+        );
+        assert!(
+            lock_inflight_entry(&entry).completed,
+            "aborted leader guard must mark inflight entry completed"
+        );
+        assert!(
+            cancel_token.is_cancelled(),
+            "aborted leader guard must cancel the leader token"
+        );
+        let err1 = rx1
+            .try_recv()
+            .expect("waiter 1 notified")
+            .err()
+            .expect("waiter 1 receives error");
+        let err2 = rx2
+            .try_recv()
+            .expect("waiter 2 notified")
+            .err()
+            .expect("waiter 2 receives error");
+        assert!(err1.to_string().contains("terminated unexpectedly"));
+        assert!(err2.to_string().contains("terminated unexpectedly"));
+    }
+
+    #[test]
+    fn fan_out_inflight_error_preserves_retryable_root_cause_for_all_waiters() {
+        let (tx1, mut rx1) = oneshot::channel();
+        let (tx2, mut rx2) = oneshot::channel();
+        let original = anyhow!("IO Error: simulated transient GCS read error")
+            .context("inspect shared workspace table");
+
+        fan_out_inflight_result(vec![tx1, tx2], Err(original));
+
+        for rx in [&mut rx1, &mut rx2] {
+            let err = rx
+                .try_recv()
+                .expect("waiter notified")
                 .err()
-                .map(|e| e.to_string().contains("cancelled"))
-                .unwrap_or(false),
-            "waiter must see leader cancellation"
-        );
-        assert!(
-            InflightLease::lock_map(&inflight).get(&key).is_none(),
-            "cancelled leader must drop the inflight key"
-        );
-        // A later identical query can become the new leader.
-        InflightLease::lock_map(&inflight).insert(key, Vec::new());
-        let mut lease = InflightLease {
-            inflight: inflight.clone(),
-            key,
-            armed: true,
-        };
-        assert!(lease.take_waiters().is_empty());
-        assert!(InflightLease::lock_map(&inflight).get(&key).is_none());
+                .expect("waiter receives error");
+            assert_eq!(err.to_string(), "inspect shared workspace table");
+            assert_eq!(
+                err.root_cause().to_string(),
+                "IO Error: simulated transient GCS read error"
+            );
+            let kind = crate::api::error::classify_storage_error_chain(&err);
+            assert_eq!(kind.code, "query_unavailable");
+            assert!(
+                kind.retryable,
+                "coalesced follower must preserve retryable 503 classification"
+            );
+        }
     }
 }

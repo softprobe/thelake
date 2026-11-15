@@ -49,6 +49,10 @@ impl DuckLakeTraceBackend {
                         rows: Vec::new(),
                         row_count: 0,
                     })
+                } else if message.starts_with("Interrupt Error")
+                    || message.contains("DuckDB query cancelled")
+                {
+                    Err(deadline())
                 } else {
                     Err(CompatError::new(
                         CompatErrorCode::BadRequest,

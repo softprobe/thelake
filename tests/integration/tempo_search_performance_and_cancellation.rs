@@ -566,3 +566,218 @@ async fn tempo_summary_fidelity_and_windowed_tags_isolated() {
 async fn tempo_summary_fidelity_and_windowed_tags_shared() {
     assert_tempo_summary_fidelity_and_windowed_tags(WorkspaceScopeMode::Shared).await;
 }
+
+async fn assert_tempo_deadline_and_http_burst_cancellation(mode: WorkspaceScopeMode) {
+    use softprobe_runtime::authn::WorkspaceAuth;
+    use softprobe_runtime::compat::backends::ducklake_traces::DuckLakeTraceBackend;
+    use softprobe_runtime::compat::backends::traces::{TraceQueryBackend, TraceSearchRequest};
+    use softprobe_runtime::compat::errors::CompatErrorCode;
+    use softprobe_runtime::compat::tempo::traceql::parse_traceql;
+    use softprobe_runtime::compat::workspace::{
+        CompatWorkspaceContext, ProtocolScope, QueryLimits,
+    };
+    use softprobe_runtime::query::self_heal_snapshot;
+    use std::collections::BTreeMap;
+    use std::time::Instant;
+
+    let (router, state, temp) = setup_router(TEST_ASSERTION_SECRET, mode, 1).await;
+    let workspace_id = Uuid::new_v4().to_string();
+    provision_workspace(&state, &temp, &workspace_id).await;
+
+    let ingest_tok = agent_token(
+        TEST_ASSERTION_SECRET,
+        &workspace_id,
+        "agent-burst",
+        "burst-agent",
+    );
+    let read_tok = user_token(TEST_ASSERTION_SECRET, &workspace_id);
+
+    let now = Utc::now();
+    let base_ns = (now - ChronoDuration::minutes(5))
+        .timestamp_nanos_opt()
+        .unwrap() as u64;
+    let heavy_payload = "abcdefghij0123456789".repeat(3200);
+
+    let mut spans = Vec::with_capacity(451);
+    for idx in 0u64..450 {
+        let mut tid = [0u8; 16];
+        tid[0..8].copy_from_slice(&(idx + 1).to_be_bytes());
+        tid[8..16].copy_from_slice(&(idx + 1000).to_be_bytes());
+        let mut sid = [0u8; 8];
+        sid.copy_from_slice(&(idx + 1).to_be_bytes());
+        spans.push(Span {
+            trace_id: tid.to_vec(),
+            span_id: sid.to_vec(),
+            name: "POST /bulk".into(),
+            kind: span::SpanKind::Server as i32,
+            start_time_unix_nano: base_ns + idx * 1_000_000,
+            end_time_unix_nano: base_ns + idx * 1_000_000 + 20_000_000,
+            attributes: vec![string_kv("http.request.body.content", &heavy_payload)],
+            status: Some(Status {
+                code: 1,
+                message: String::new(),
+            }),
+            ..Default::default()
+        });
+    }
+
+    let target_trace_id: Vec<u8> = (0..16).map(|b| 0x90 + b).collect();
+    let target_trace_hex = hex::encode(&target_trace_id);
+    spans.push(Span {
+        trace_id: target_trace_id,
+        span_id: vec![9, 8, 7, 6, 5, 4, 3, 2],
+        name: "POST /orders".into(),
+        kind: span::SpanKind::Server as i32,
+        start_time_unix_nano: base_ns + 600_000_000,
+        end_time_unix_nano: base_ns + 850_000_000,
+        attributes: vec![string_kv("http.response.status_code", "500")],
+        status: Some(Status {
+            code: 2,
+            message: "internal error".into(),
+        }),
+        ..Default::default()
+    });
+
+    for chunk in spans.chunks(20) {
+        let batch = ExportTraceServiceRequest {
+            resource_spans: vec![ResourceSpans {
+                resource: Some(Resource {
+                    attributes: vec![string_kv("service.name", "orders-api")],
+                    ..Default::default()
+                }),
+                scope_spans: vec![ScopeSpans {
+                    scope: None,
+                    spans: chunk.to_vec(),
+                    schema_url: String::new(),
+                }],
+                schema_url: String::new(),
+            }],
+        };
+        assert_eq!(
+            ingest_otlp(&router, &ingest_tok, batch).await,
+            StatusCode::OK
+        );
+    }
+    let ws = state.workspace_for_id(&workspace_id).await.expect("ws");
+    ws.ingest().force_flush_spans().await.expect("flush spans");
+
+    let start_sec = (now - ChronoDuration::hours(1)).timestamp();
+    let end_sec = (now + ChronoDuration::minutes(5)).timestamp();
+    let start_ns = start_sec * 1_000_000_000;
+    let end_ns = end_sec * 1_000_000_000;
+
+    let heal_before = self_heal_snapshot();
+
+    let backend = DuckLakeTraceBackend::new(ws.query().clone());
+    let auth = WorkspaceAuth {
+        workspace_id: workspace_id.clone(),
+        bucket_name: "test-bucket".into(),
+        dataset_id: "test-dataset".into(),
+        agent_id: None,
+        agent_name: None,
+    };
+    let mut expired_ctx = CompatWorkspaceContext::from_authenticated(
+        auth,
+        ProtocolScope::Tempo,
+        None,
+        QueryLimits::default(),
+    )
+    .expect("ctx");
+    expired_ctx.deadline = Instant::now();
+    let deadline_err = backend
+        .search(
+            &expired_ctx,
+            TraceSearchRequest {
+                tags: BTreeMap::new(),
+                selector: Some(parse_traceql("{ status = error }").unwrap()),
+                min_duration_ns: Some(100_000_000),
+                max_duration_ns: None,
+                start_ns: Some(start_ns),
+                end_ns: Some(end_ns),
+                limit: 20,
+            },
+        )
+        .await
+        .expect_err("zero remaining deadline must fail immediately");
+    assert_eq!(deadline_err.code, CompatErrorCode::LimitExceeded);
+
+    for burst_idx in 0..5 {
+        let r = router.clone();
+        let tok = read_tok.clone();
+        let uri = format!(
+            "/api/search?q=%7B%20.http.request.body.content%20%3D~%20%22.*abcdefghij.*0123456789.*miss_{burst_idx}%22%20%7D&start={start_sec}&end={end_sec}&limit=20"
+        );
+        let req = Request::builder()
+            .method("GET")
+            .uri(uri)
+            .header(ASSERTION_HEADER, tok)
+            .body(Body::empty())
+            .unwrap();
+        let _ = tokio::time::timeout(Duration::from_millis(5), r.oneshot(req)).await;
+    }
+
+    let sixth_started = Instant::now();
+    let (status, sixth_body) = get_json(
+        &router,
+        &read_tok,
+        &format!(
+            "/api/search?q=%7B%20status%20%3D%20error%20%7D&minDuration=100ms&start={start_sec}&end={end_sec}&limit=20"
+        ),
+    )
+    .await;
+    let sixth_elapsed = sixth_started.elapsed();
+    assert_eq!(status, StatusCode::OK, "sixth_body={sixth_body}");
+    assert_eq!(sixth_body["traces"].as_array().unwrap().len(), 1);
+    assert_eq!(sixth_body["traces"][0]["traceID"], target_trace_hex);
+    assert!(
+        sixth_elapsed < Duration::from_secs(2),
+        "surviving 6th request after 5 aborted HTTP requests took too long in {mode:?}: {sixth_elapsed:?}"
+    );
+
+    for iter in 0..10 {
+        let r = router.clone();
+        let tok = read_tok.clone();
+        let abort_uri = format!(
+            "/api/search?q=%7B%20.http.request.body.content%20%3D~%20%22.*abcdefghij.*0123456789.*loop_{iter}%22%20%7D&start={start_sec}&end={end_sec}&limit=20"
+        );
+        let abort_req = Request::builder()
+            .method("GET")
+            .uri(abort_uri)
+            .header(ASSERTION_HEADER, tok)
+            .body(Body::empty())
+            .unwrap();
+        let _ = tokio::time::timeout(Duration::from_millis(2), r.oneshot(abort_req)).await;
+
+        let (ok_status, ok_body) = get_json(
+            &router,
+            &read_tok,
+            &format!(
+                "/api/search?q=%7B%20status%20%3D%20error%20%7D&minDuration=100ms&start={start_sec}&end={end_sec}&limit=20"
+            ),
+        )
+        .await;
+        assert_eq!(
+            ok_status,
+            StatusCode::OK,
+            "consecutive query {iter} after abort must not inherit a stale interrupt in {mode:?}: {ok_body}"
+        );
+        assert_eq!(ok_body["traces"].as_array().unwrap().len(), 1);
+    }
+
+    let heal_after = self_heal_snapshot();
+    assert_eq!(
+        heal_after.rebuilds, heal_before.rebuilds,
+        "aborted HTTP burst must not poison or rebuild DuckDB slots in {mode:?}"
+    );
+    assert_eq!(heal_after.consecutive_failures, 0);
+}
+
+#[tokio::test]
+async fn tempo_query_deadline_and_http_burst_cancellation_isolated() {
+    assert_tempo_deadline_and_http_burst_cancellation(WorkspaceScopeMode::Isolated).await;
+}
+
+#[tokio::test]
+async fn tempo_query_deadline_and_http_burst_cancellation_shared() {
+    assert_tempo_deadline_and_http_burst_cancellation(WorkspaceScopeMode::Shared).await;
+}

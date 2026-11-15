@@ -16,14 +16,150 @@ use crate::storage::duckdb::cache::{
     cache_httpfs_disabled_by_env, wrap_one, CacheSettings, WrapAttempt,
 };
 use anyhow::{anyhow, bail, Result};
-use duckdb::Connection;
+use duckdb::{Connection, InterruptHandle};
 use once_cell::sync::Lazy;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
-use tokio::sync::{mpsc, oneshot, OwnedSemaphorePermit, Semaphore};
+use tokio::sync::{mpsc, oneshot, Notify, OwnedSemaphorePermit, Semaphore};
 use tracing::{info, warn};
+
+pub(crate) const QUERY_CANCELLED_MESSAGE: &str = "DuckDB query cancelled";
+
+struct CancelTokenInner {
+    cancelled: AtomicBool,
+    done: AtomicBool,
+    notify: Notify,
+    active_interrupt: Mutex<Option<Arc<InterruptHandle>>>,
+}
+
+pub(crate) struct InterruptBindingGuard {
+    inner: Arc<CancelTokenInner>,
+}
+
+impl Drop for InterruptBindingGuard {
+    fn drop(&mut self) {
+        *lock_ignoring_poison(&self.inner.active_interrupt) = None;
+    }
+}
+
+/// Cooperative + DuckDB `InterruptHandle` cancellation token for one query execution.
+#[derive(Clone)]
+pub(crate) struct QueryCancelToken {
+    inner: Arc<CancelTokenInner>,
+}
+
+impl QueryCancelToken {
+    pub(crate) fn new() -> Self {
+        Self {
+            inner: Arc::new(CancelTokenInner {
+                cancelled: AtomicBool::new(false),
+                done: AtomicBool::new(false),
+                notify: Notify::new(),
+                active_interrupt: Mutex::new(None),
+            }),
+        }
+    }
+
+    pub(crate) fn is_cancelled(&self) -> bool {
+        self.inner.cancelled.load(Ordering::Acquire)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn is_done(&self) -> bool {
+        self.inner.done.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn mark_done(&self) {
+        self.inner.done.store(true, Ordering::Release);
+    }
+
+    pub(crate) async fn wait_cancelled(&self) {
+        let notified = self.inner.notify.notified();
+        if self.is_cancelled() {
+            return;
+        }
+        notified.await;
+    }
+
+    pub(crate) fn bind_interrupt(
+        &self,
+        handle: Arc<InterruptHandle>,
+    ) -> Result<InterruptBindingGuard> {
+        let mut active = lock_ignoring_poison(&self.inner.active_interrupt);
+        if self.is_cancelled() {
+            return Err(anyhow!(QUERY_CANCELLED_MESSAGE));
+        }
+        *active = Some(handle);
+        drop(active);
+        if self.is_cancelled() {
+            *lock_ignoring_poison(&self.inner.active_interrupt) = None;
+            return Err(anyhow!(QUERY_CANCELLED_MESSAGE));
+        }
+        Ok(InterruptBindingGuard {
+            inner: Arc::clone(&self.inner),
+        })
+    }
+
+    pub(crate) fn cancel(&self) {
+        if self.inner.cancelled.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        self.inner.notify.notify_waiters();
+        let had_active_handle = {
+            let active = lock_ignoring_poison(&self.inner.active_interrupt);
+            if let Some(ref handle) = *active {
+                handle.interrupt();
+                true
+            } else {
+                false
+            }
+        };
+        if had_active_handle && !self.inner.done.load(Ordering::Acquire) {
+            if let Ok(rt) = tokio::runtime::Handle::try_current() {
+                let inner = Arc::clone(&self.inner);
+                rt.spawn(async move {
+                    let mut ticker = tokio::time::interval(Duration::from_millis(5));
+                    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                    ticker.tick().await;
+                    while !inner.done.load(Ordering::Acquire) {
+                        ticker.tick().await;
+                        let active = lock_ignoring_poison(&inner.active_interrupt);
+                        let Some(ref handle) = *active else {
+                            break;
+                        };
+                        handle.interrupt();
+                    }
+                });
+            }
+        }
+    }
+}
+
+struct MarkDoneOnDrop {
+    token: Option<QueryCancelToken>,
+}
+
+impl MarkDoneOnDrop {
+    fn new(token: QueryCancelToken) -> Self {
+        Self { token: Some(token) }
+    }
+
+    fn take_into_worker(&mut self) -> Self {
+        Self {
+            token: self.token.take(),
+        }
+    }
+}
+
+impl Drop for MarkDoneOnDrop {
+    fn drop(&mut self) {
+        if let Some(ref token) = self.token {
+            token.mark_done();
+        }
+    }
+}
 
 pub(crate) static CACHE_HTTPFS_CONFIG_WARNED: Lazy<AtomicBool> =
     Lazy::new(|| AtomicBool::new(false));
@@ -122,18 +258,19 @@ impl CatalogPool {
 
     /// Run `job` on a query slot that serves `workspace_id`.
     ///
-    /// The slot is leased until the job finishes on its thread, even when the
-    /// awaiting caller is cancelled.
+    /// Cancelling `cancel_token` interrupts an active DuckDB query on the slot
+    /// or skips execution if the request is still queued before slot checkout.
     pub(crate) async fn with_query<R: Send + 'static>(
         &self,
         workspace_id: &str,
-        job: impl FnOnce(&mut QuerySlot, &QueryCaller) -> R + Send + 'static,
+        cancel_token: QueryCancelToken,
+        job: impl FnOnce(&mut QuerySlot, &QueryCaller, &QueryCancelToken) -> R + Send + 'static,
     ) -> Result<R> {
         let caller = match self.mode {
             WorkspaceScopeMode::Shared => QueryCaller::Workspace(workspace_id.to_string()),
             WorkspaceScopeMode::Isolated => QueryCaller::Catalog,
         };
-        self.queries.run(caller, job).await
+        self.queries.run(caller, cancel_token, job).await
     }
 
     /// Borrow the maintenance session.
@@ -377,6 +514,7 @@ impl SlotBinding {
 /// One query-lane DuckDB session plus its cache_httpfs wrap progress.
 pub(crate) struct QuerySession {
     pub(crate) conn: Connection,
+    pub(crate) interrupt_handle: Arc<InterruptHandle>,
     cache_httpfs_wrap_supported: bool,
     cache_httpfs_wrapped_s3: bool,
     cache_httpfs_wrapped_httpfs: bool,
@@ -384,8 +522,10 @@ pub(crate) struct QuerySession {
 
 impl QuerySession {
     pub(crate) fn new(conn: Connection) -> Self {
+        let interrupt_handle = conn.interrupt_handle();
         Self {
             conn,
+            interrupt_handle,
             cache_httpfs_wrap_supported: true,
             cache_httpfs_wrapped_s3: false,
             cache_httpfs_wrapped_httpfs: false,
@@ -751,18 +891,38 @@ impl QueryLane {
     async fn run<R: Send + 'static>(
         &self,
         caller: QueryCaller,
-        job: impl FnOnce(&mut QuerySlot, &QueryCaller) -> R + Send + 'static,
+        cancel_token: QueryCancelToken,
+        job: impl FnOnce(&mut QuerySlot, &QueryCaller, &QueryCancelToken) -> R + Send + 'static,
     ) -> Result<R> {
-        let lease = self.checkout(&caller).await?;
+        let mut done_guard = MarkDoneOnDrop::new(cancel_token.clone());
+        let lease = tokio::select! {
+            biased;
+            _ = cancel_token.wait_cancelled() => {
+                return Err(anyhow!(QUERY_CANCELLED_MESSAGE));
+            }
+            res = self.checkout(&caller) => res?,
+        };
+        if cancel_token.is_cancelled() {
+            return Err(anyhow!(QUERY_CANCELLED_MESSAGE));
+        }
         let sender = self.workers[lease.index]
             .sender
             .as_ref()
             .ok_or_else(|| anyhow!("DuckDB worker channel closed"))?;
         let (tx, rx) = oneshot::channel();
+        let worker_token = cancel_token.clone();
+        let worker_done_guard = done_guard.take_into_worker();
         sender
             .send(Box::new(move |slot| {
                 let _lease = lease;
-                let outcome = slot.bind(&caller).map(|()| job(slot, &caller));
+                let _worker_done_guard = worker_done_guard;
+                if worker_token.is_cancelled() {
+                    let _ = tx.send(Err(anyhow!(QUERY_CANCELLED_MESSAGE)));
+                    return;
+                }
+                let outcome = slot
+                    .bind(&caller)
+                    .map(|()| job(slot, &caller, &worker_token));
                 let _ = tx.send(outcome);
             }))
             .map_err(|_| anyhow!("DuckDB worker channel closed"))?;
