@@ -28,7 +28,7 @@ pub(crate) use physical_scope::{
 pub(crate) use writer::DuckLakeWriter;
 
 pub(crate) use attach::{
-    ducklake_qualified_table_name, ducklake_set_option_scope_for_qualified, DuckLakeSessionFactory,
+    ducklake_qualified_table_name, DuckLakeSessionFactory,
     DuckLakeSessionKind,
 };
 pub use attach::{open_attached_from_config, open_attached_from_warehouse, AttachedSession};

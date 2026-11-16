@@ -404,50 +404,12 @@ pub(crate) fn open_attached_connection(
     connection
 }
 
-/// Scoping clause for `CALL <catalog>.set_option(...)` matching a qualified table name.
-/// Three-part `catalog.schema.table` → `schema` + `table_name`; legacy two-part → `table_name` only.
-pub(crate) fn ducklake_set_option_scope_for_qualified(qualified_table: &str) -> String {
-    let parts: Vec<&str> = qualified_table.split('.').collect();
-    match parts.len() {
-        3 => {
-            let s = escape_sql_literal(parts[1]);
-            let t = escape_sql_literal(parts[2]);
-            format!("schema => '{s}', table_name => '{t}'")
-        }
-        2 => {
-            let t = escape_sql_literal(parts[1]);
-            format!("table_name => '{t}'")
-        }
-        _ => {
-            let t = escape_sql_literal(parts.last().copied().unwrap_or(""));
-            format!("table_name => '{t}'")
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::storage::ducklake::physical_scope::{
         DuckLakeAccess, PhysicalScope, WorkspaceBinding, WorkspaceScopeMode,
     };
-
-    #[test]
-    fn set_option_scope_matches_qualified_table_shape() {
-        assert_eq!(
-            ducklake_set_option_scope_for_qualified("softprobe.main.traces"),
-            "schema => 'main', table_name => 'traces'"
-        );
-        assert_eq!(
-            ducklake_set_option_scope_for_qualified("softprobe.tenant_a.traces"),
-            "schema => 'tenant_a', table_name => 'traces'"
-        );
-        // Legacy two-part still maps to table_name-only (should not appear for product paths).
-        assert_eq!(
-            ducklake_set_option_scope_for_qualified("softprobe.traces"),
-            "table_name => 'traces'"
-        );
-    }
 
     #[test]
     fn query_resource_caps_pin_single_thread() {

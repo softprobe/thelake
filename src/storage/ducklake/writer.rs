@@ -190,13 +190,14 @@ impl DuckLakeWriter {
         custom_schema: Option<&Arc<Schema>>,
     ) -> Result<()> {
         let qualified_table = ducklake_qualified_table_name(scope, table_name);
-        let ddl = base_table_ddl(table_name)
+        let base_ddl = base_table_ddl(table_name)
             .ok_or_else(|| anyhow!("unsupported table for DuckLake ensure: {table_name}"))?
             .replacen(
                 &format!("CREATE TABLE IF NOT EXISTS {table_name}"),
                 &format!("CREATE TABLE IF NOT EXISTS {qualified_table}"),
                 1,
             );
+        let ddl = super::layout::otlp_create_table_ddl(conn, &base_ddl, table_name)?;
         conn.execute_batch(&ddl)
             .map_err(|error| anyhow!("DuckLake base DDL failed for {qualified_table}: {error}"))?;
 
@@ -276,7 +277,7 @@ impl DuckLakeWriter {
 
         if is_otlp_table(table_name) {
             ensure_otlp_table_partition_sort(conn, &qualified_table)?;
-            super::layout::apply_otlp_layout_profile(conn, scope, table_name)?;
+            super::layout::apply_otlp_writer_session(conn, table_name)?;
         }
         Ok(())
     }
