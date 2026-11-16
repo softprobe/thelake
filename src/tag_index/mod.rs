@@ -16,21 +16,27 @@ use tracing::warn;
 const TAG_INDEX_DDL: &str = include_str!("../sql/schema/tag_index.sql");
 const TAG_INDEX_UPSERT_SQL: &str = include_str!("../sql/tag_index/upsert.sql");
 const TAG_INDEX_LIST_SQL: &str = include_str!("../sql/tag_index/list.sql");
+const TAG_INDEX_LIST_SINCE_SQL: &str = include_str!("../sql/tag_index/list_since.sql");
+const TAG_INDEX_SOURCE_MASK_SQL: &str = include_str!("../sql/tag_index/source_mask.sql");
 
 pub const TAG_FLUSH_WINDOW: Duration = Duration::from_secs(60);
+pub const TAG_FLUSH_WINDOW_NS: i64 = 60_000_000_000;
+pub const TAG_SOURCE_SPAN_OR_RESOURCE: i16 = 1;
+pub const TAG_SOURCE_EVENT_OR_LINK: i16 = 2;
 const MAX_CACHED_TAGS: usize = 16_384;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TagEntry {
     pub tag: String,
     pub last_seen_ns: i64,
+    pub source_mask: i16,
 }
 
 #[derive(Debug)]
 pub struct TagFlushThrottle {
     window: Duration,
     max_entries: usize,
-    last_flushed: Mutex<HashMap<String, Instant>>,
+    last_flushed: Mutex<HashMap<String, (Instant, i16)>>,
 }
 
 impl Default for TagFlushThrottle {
@@ -51,78 +57,88 @@ impl TagFlushThrottle {
     pub fn filter_due(&self, entries: Vec<TagEntry>, now: Instant) -> Vec<TagEntry> {
         let mut guard = self.last_flushed.lock().expect("tag flush throttle lock");
         let mut due = Vec::new();
-        for entry in entries {
-            let is_due = match guard.get(&entry.tag) {
-                Some(prev) => now.saturating_duration_since(*prev) >= self.window,
-                None => true,
+        for mut entry in entries {
+            let (is_due, merged_mask) = match guard.get(&entry.tag) {
+                Some(&(prev_at, prev_mask)) => {
+                    let window_elapsed = now.saturating_duration_since(prev_at) >= self.window;
+                    let new_source_bit = (entry.source_mask & !prev_mask) != 0;
+                    (window_elapsed || new_source_bit, prev_mask | entry.source_mask)
+                }
+                None => (true, entry.source_mask),
             };
             if !is_due {
                 continue;
             }
             if !guard.contains_key(&entry.tag) && guard.len() >= self.max_entries {
-                guard.retain(|_, ts| now.saturating_duration_since(*ts) < self.window);
+                guard.retain(|_, (ts, _)| now.saturating_duration_since(*ts) < self.window);
                 if guard.len() >= self.max_entries {
                     if let Some(oldest) = guard
                         .iter()
-                        .min_by_key(|(_, ts)| *ts)
+                        .min_by_key(|(_, (ts, _))| *ts)
                         .map(|(k, _)| k.clone())
                     {
                         guard.remove(&oldest);
                     }
                 }
             }
-            guard.insert(entry.tag.clone(), now);
+            entry.source_mask = merged_mask;
+            guard.insert(entry.tag.clone(), (now, merged_mask));
             due.push(entry);
         }
         due
     }
 }
 
-fn record_tag(map: &mut HashMap<String, i64>, key: &str, ts_ns: i64) {
+fn record_tag(map: &mut HashMap<String, (i64, i16)>, key: &str, ts_ns: i64, source_mask: i16) {
     if key.is_empty() {
         return;
     }
     map.entry(key.to_owned())
-        .and_modify(|max_ts| {
+        .and_modify(|(max_ts, mask)| {
             if ts_ns > *max_ts {
                 *max_ts = ts_ns;
             }
+            *mask |= source_mask;
         })
-        .or_insert(ts_ns);
+        .or_insert((ts_ns, source_mask));
 }
 
-/// Fold distinct tag keys and their max span timestamp (ns) from committed batches.
+/// Fold distinct tag keys, max span timestamp (ns), and source bitmask from committed batches.
 pub fn fold_tag_entries(batches: &[Vec<Span>]) -> Vec<TagEntry> {
-    let mut map: HashMap<String, i64> = HashMap::new();
+    let mut map: HashMap<String, (i64, i16)> = HashMap::new();
     for span in batches.iter().flatten() {
         let ts_ns = crate::models::event_time::to_ns(span.timestamp);
         for key in span.attributes.keys() {
             if key != INSTRUMENTATION_SCOPE_ATTRIBUTE && key != LINKS_ATTRIBUTE {
-                record_tag(&mut map, key, ts_ns);
+                record_tag(&mut map, key, ts_ns, TAG_SOURCE_SPAN_OR_RESOURCE);
             }
         }
         for key in span.resource_attributes.keys() {
-            record_tag(&mut map, key, ts_ns);
+            record_tag(&mut map, key, ts_ns, TAG_SOURCE_SPAN_OR_RESOURCE);
         }
         if !span.app_id.is_empty() {
-            record_tag(&mut map, "service.name", ts_ns);
+            record_tag(&mut map, "service.name", ts_ns, TAG_SOURCE_SPAN_OR_RESOURCE);
         }
         for event in &span.events {
             for key in event.attributes.keys() {
-                record_tag(&mut map, key, ts_ns);
+                record_tag(&mut map, key, ts_ns, TAG_SOURCE_EVENT_OR_LINK);
             }
         }
         if let Some(raw_links) = span.attributes.get(LINKS_ATTRIBUTE) {
             if let Ok(Value::Array(links)) = serde_json::from_str::<Value>(raw_links) {
                 for key in project_tempo_link_attributes(&links).keys() {
-                    record_tag(&mut map, key, ts_ns);
+                    record_tag(&mut map, key, ts_ns, TAG_SOURCE_EVENT_OR_LINK);
                 }
             }
         }
     }
     let mut out: Vec<TagEntry> = map
         .into_iter()
-        .map(|(tag, last_seen_ns)| TagEntry { tag, last_seen_ns })
+        .map(|(tag, (last_seen_ns, source_mask))| TagEntry {
+            tag,
+            last_seen_ns,
+            source_mask,
+        })
         .collect();
     out.sort_by(|a, b| a.tag.cmp(&b.tag));
     out
@@ -192,6 +208,60 @@ impl TagIndexReader {
     pub async fn list(&self, limit: usize) -> Result<Vec<String>> {
         list_tags(&self.pool, &self.metadata_schema, &self.workspace_id, limit).await
     }
+
+    pub async fn list_since(
+        &self,
+        min_last_seen_ns: i64,
+        limit: usize,
+    ) -> Result<Option<Vec<String>>> {
+        let client = self
+            .pool
+            .get()
+            .await
+            .map_err(|e| anyhow!("tag_index pool get: {e}"))?;
+        let sql = TAG_INDEX_LIST_SINCE_SQL
+            .replace("{{schema_quoted}}", &quote_pg_ident(&self.metadata_schema));
+        let statement = client
+            .prepare_cached(&sql)
+            .await
+            .context("prepare tag_index list_since")?;
+        let limit_i64 = i64::try_from(limit).unwrap_or(i64::MAX);
+        let rows = client
+            .query(&statement, &[&self.workspace_id, &min_last_seen_ns, &limit_i64])
+            .await
+            .context("query tag_index list_since")?;
+        let Some(first) = rows.first() else {
+            return Ok(None);
+        };
+        let populated: bool = first.get(0);
+        if !populated {
+            return Ok(None);
+        }
+        let tags = rows
+            .into_iter()
+            .filter_map(|row| row.get::<_, Option<String>>(1))
+            .collect();
+        Ok(Some(tags))
+    }
+
+    pub async fn source_mask(&self, tag: &str) -> Result<Option<i16>> {
+        let client = self
+            .pool
+            .get()
+            .await
+            .map_err(|e| anyhow!("tag_index pool get: {e}"))?;
+        let sql = TAG_INDEX_SOURCE_MASK_SQL
+            .replace("{{schema_quoted}}", &quote_pg_ident(&self.metadata_schema));
+        let statement = client
+            .prepare_cached(&sql)
+            .await
+            .context("prepare tag_index source_mask")?;
+        let row = client
+            .query_opt(&statement, &[&self.workspace_id, &tag])
+            .await
+            .context("query tag_index source_mask")?;
+        Ok(row.map(|r| r.get::<_, i16>(0)))
+    }
 }
 
 #[derive(Clone)]
@@ -255,12 +325,16 @@ impl TagIndexWriter {
             .replace("{{schema_quoted}}", &quote_pg_ident(&self.metadata_schema));
         let tags: Vec<String> = entries.iter().map(|e| e.tag.clone()).collect();
         let last_seen_ns: Vec<i64> = entries.iter().map(|e| e.last_seen_ns).collect();
+        let source_masks: Vec<i16> = entries.iter().map(|e| e.source_mask).collect();
         let statement = client
             .prepare_cached(&sql)
             .await
             .context("prepare tag_index UPSERT")?;
         client
-            .execute(&statement, &[&self.workspace_id, &tags, &last_seen_ns])
+            .execute(
+                &statement,
+                &[&self.workspace_id, &tags, &last_seen_ns, &source_masks],
+            )
             .await
             .context("tag_index UPSERT")?;
         Ok(())
@@ -363,6 +437,7 @@ mod tests {
             vec![TagEntry {
                 tag: "a".into(),
                 last_seen_ns: 1,
+                source_mask: TAG_SOURCE_SPAN_OR_RESOURCE,
             }],
             t0,
         );
@@ -372,6 +447,7 @@ mod tests {
             vec![TagEntry {
                 tag: "a".into(),
                 last_seen_ns: 2,
+                source_mask: TAG_SOURCE_SPAN_OR_RESOURCE,
             }],
             t0 + Duration::from_secs(30),
         );
@@ -381,6 +457,7 @@ mod tests {
             vec![TagEntry {
                 tag: "a".into(),
                 last_seen_ns: 3,
+                source_mask: TAG_SOURCE_SPAN_OR_RESOURCE,
             }],
             t0 + Duration::from_secs(61),
         );
@@ -392,14 +469,17 @@ mod tests {
                 TagEntry {
                     tag: "b".into(),
                     last_seen_ns: 4,
+                    source_mask: TAG_SOURCE_SPAN_OR_RESOURCE,
                 },
                 TagEntry {
                     tag: "c".into(),
                     last_seen_ns: 5,
+                    source_mask: TAG_SOURCE_SPAN_OR_RESOURCE,
                 },
                 TagEntry {
                     tag: "d".into(),
                     last_seen_ns: 6,
+                    source_mask: TAG_SOURCE_SPAN_OR_RESOURCE,
                 },
             ],
             t0 + Duration::from_secs(62),
@@ -411,6 +491,7 @@ mod tests {
             vec![TagEntry {
                 tag: "e".into(),
                 last_seen_ns: 7,
+                source_mask: TAG_SOURCE_SPAN_OR_RESOURCE,
             }],
             t0 + Duration::from_secs(130),
         );
@@ -503,10 +584,12 @@ mod tests {
             TagEntry {
                 tag: "z.tag".into(),
                 last_seen_ns: 200,
+                source_mask: TAG_SOURCE_SPAN_OR_RESOURCE,
             },
             TagEntry {
                 tag: "a.tag".into(),
                 last_seen_ns: 100,
+                source_mask: TAG_SOURCE_SPAN_OR_RESOURCE,
             },
         ])
         .await
@@ -515,12 +598,14 @@ mod tests {
         w1.upsert_entries(&[TagEntry {
             tag: "a.tag".into(),
             last_seen_ns: 50,
+            source_mask: TAG_SOURCE_SPAN_OR_RESOURCE,
         }])
         .await
         .unwrap();
         w2.upsert_entries(&[TagEntry {
             tag: "other.ws".into(),
             last_seen_ns: 300,
+            source_mask: TAG_SOURCE_SPAN_OR_RESOURCE,
         }])
         .await
         .unwrap();
@@ -548,5 +633,132 @@ mod tests {
             .unwrap()
             .get(0);
         assert_eq!(seen_a, 100);
+    }
+
+    #[test]
+    fn fold_tag_entries_tracks_and_ors_source_mask() {
+        let mut s = span_at("s1", 10);
+        s.app_id = String::new();
+        s.attributes.insert("span.only".into(), "1".into());
+        s.attributes.insert("shared.attr".into(), "1".into());
+        s.resource_attributes.insert("res.only".into(), "1".into());
+        s.events.push(SpanEvent {
+            name: "evt".into(),
+            timestamp: Utc.timestamp_opt(10, 0).unwrap(),
+            attributes: [("evt.only".into(), "1".into()), ("shared.attr".into(), "2".into())].into(),
+        });
+        s.attributes.insert(
+            LINKS_ATTRIBUTE.into(),
+            serde_json::json!([{"attributes": {"only": "1"}}]).to_string(),
+        );
+
+        let entries: std::collections::BTreeMap<String, (i64, i16)> = fold_tag_entries(&[vec![s]])
+            .into_iter()
+            .map(|e| (e.tag, (e.last_seen_ns, e.source_mask)))
+            .collect();
+        let expected_ts = 10_000_000_000;
+        assert_eq!(entries.get("span.only"), Some(&(expected_ts, TAG_SOURCE_SPAN_OR_RESOURCE)));
+        assert_eq!(entries.get("res.only"), Some(&(expected_ts, TAG_SOURCE_SPAN_OR_RESOURCE)));
+        assert_eq!(entries.get("evt.only"), Some(&(expected_ts, TAG_SOURCE_EVENT_OR_LINK)));
+        assert_eq!(entries.get("link.only"), Some(&(expected_ts, TAG_SOURCE_EVENT_OR_LINK)));
+        assert_eq!(
+            entries.get("shared.attr"),
+            Some(&(expected_ts, TAG_SOURCE_SPAN_OR_RESOURCE | TAG_SOURCE_EVENT_OR_LINK))
+        );
+    }
+
+    #[test]
+    fn throttle_bypasses_window_when_source_mask_gains_new_bit() {
+        let throttle = TagFlushThrottle::with_limits(Duration::from_secs(60), 10);
+        let t0 = Instant::now();
+        let due1 = throttle.filter_due(
+            vec![TagEntry {
+                tag: "a".into(),
+                last_seen_ns: 100,
+                source_mask: TAG_SOURCE_SPAN_OR_RESOURCE,
+            }],
+            t0,
+        );
+        assert_eq!(due1.len(), 1);
+
+        let due2 = throttle.filter_due(
+            vec![TagEntry {
+                tag: "a".into(),
+                last_seen_ns: 110,
+                source_mask: TAG_SOURCE_SPAN_OR_RESOURCE,
+            }],
+            t0 + Duration::from_secs(5),
+        );
+        assert!(due2.is_empty());
+
+        let due3 = throttle.filter_due(
+            vec![TagEntry {
+                tag: "a".into(),
+                last_seen_ns: 120,
+                source_mask: TAG_SOURCE_EVENT_OR_LINK,
+            }],
+            t0 + Duration::from_secs(6),
+        );
+        assert_eq!(due3.len(), 1);
+        assert_eq!(
+            due3[0].source_mask,
+            TAG_SOURCE_SPAN_OR_RESOURCE | TAG_SOURCE_EVENT_OR_LINK
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires ducklake-postgres; make test-lease-pg / make test-e2e"]
+    async fn postgres_tag_index_list_since_and_source_mask() {
+        let schema = "thelake_tag_idx_mask_test";
+        let pool = pg_pool(schema).await;
+        let reader = TagIndexReader::new(pool.clone(), schema, "ws-mask");
+        let writer = TagIndexWriter::new(pool.clone(), schema, "ws-mask");
+
+        assert_eq!(reader.list_since(0, 10).await.unwrap(), None);
+        assert_eq!(reader.source_mask("s.tag").await.unwrap(), None);
+
+        writer
+            .upsert_entries(&[
+                TagEntry {
+                    tag: "s.tag".into(),
+                    last_seen_ns: 100,
+                    source_mask: TAG_SOURCE_SPAN_OR_RESOURCE,
+                },
+                TagEntry {
+                    tag: "e.tag".into(),
+                    last_seen_ns: 500,
+                    source_mask: TAG_SOURCE_EVENT_OR_LINK,
+                },
+            ])
+            .await
+            .unwrap();
+
+        assert_eq!(
+            reader.list_since(400, 10).await.unwrap(),
+            Some(vec!["e.tag".to_string()])
+        );
+        assert_eq!(reader.list_since(900, 10).await.unwrap(), Some(Vec::new()));
+        assert_eq!(
+            reader.source_mask("s.tag").await.unwrap(),
+            Some(TAG_SOURCE_SPAN_OR_RESOURCE)
+        );
+        assert_eq!(
+            reader.source_mask("e.tag").await.unwrap(),
+            Some(TAG_SOURCE_EVENT_OR_LINK)
+        );
+        assert_eq!(reader.source_mask("missing").await.unwrap(), None);
+
+        writer
+            .upsert_entries(&[TagEntry {
+                tag: "s.tag".into(),
+                last_seen_ns: 600,
+                source_mask: TAG_SOURCE_EVENT_OR_LINK,
+            }])
+            .await
+            .unwrap();
+        assert_eq!(
+            reader.source_mask("s.tag").await.unwrap(),
+            Some(TAG_SOURCE_SPAN_OR_RESOURCE | TAG_SOURCE_EVENT_OR_LINK)
+        );
     }
 }
