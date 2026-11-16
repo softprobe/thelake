@@ -8,6 +8,7 @@
 mod attach;
 mod catalog_pool;
 pub(crate) mod layout;
+pub mod migrate_variant;
 mod object_store;
 mod otlp;
 pub(crate) mod physical_scope;
@@ -34,5 +35,6 @@ pub use attach::{
     migrate_ducklake_catalog_from_config, open_attached_from_config, open_attached_from_warehouse,
     AttachedSession,
 };
-pub(crate) use util::cache_httpfs_disabled_by_env;
+pub(crate) use object_store::configure_object_store;
+pub(crate) use util::{cache_httpfs_disabled_by_env, escape_sql_literal};
 pub(crate) use workspace_views::validate_shared_workspace_schema;
