@@ -11,6 +11,7 @@ from urllib.request import Request, urlopen
 
 STAGING_URL = "https://thelake-staging.softprobe.ai"
 STAGING_TOKEN = "staging-thelake-smoke-token"
+STAGING_USER_AGENT = "TheLake-Staging-E2E/1.0"
 POLL_INTERVAL_SECONDS = 5
 REQUEST_TIMEOUT_SECONDS = 10
 
@@ -72,7 +73,10 @@ def request_json(
     url: str, method: str, body: dict | None = None
 ) -> tuple[int | None, dict | None]:
     data = None if body is None else json.dumps(body).encode("utf-8")
-    headers = {"Authorization": f"Bearer {STAGING_TOKEN}"}
+    headers = {
+        "Authorization": f"Bearer {STAGING_TOKEN}",
+        "User-Agent": STAGING_USER_AGENT,
+    }
     if data is not None:
         headers["Content-Type"] = "application/json"
     request = Request(url, data=data, headers=headers, method=method)
@@ -109,6 +113,7 @@ def run_staging_e2e(base_url: str, timeout_seconds: int) -> None:
             "Authorization": f"Bearer {STAGING_TOKEN}",
             "Baggage": f"sp.session.id={session_id}",
             "Content-Type": "application/json",
+            "User-Agent": STAGING_USER_AGENT,
         },
         method="POST",
     )

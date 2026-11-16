@@ -1,3 +1,4 @@
+import json
 import sys
 import unittest
 from http.client import IncompleteRead
@@ -10,6 +11,57 @@ import staging_e2e
 
 
 class StagingE2ETest(unittest.TestCase):
+    def test_staging_requests_set_a_cloudflare_compatible_user_agent(self):
+        trace_id = "a" * 32
+        span_id = "b" * 16
+        session_id = f"ses_staging_e2e_{span_id}"
+        readback = {
+            "trace": {"trace_id": trace_id, "session_id": session_id},
+            "spans": [
+                {
+                    "trace_id": trace_id,
+                    "span_id": span_id,
+                    "session_id": session_id,
+                }
+            ],
+        }
+
+        class Response:
+            status = 200
+
+            def __init__(self, body):
+                self.body = body
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc_value, traceback):
+                return False
+
+            def read(self):
+                return self.body
+
+        responses = [
+            Response(b"{}"),
+            Response(json.dumps(readback).encode("utf-8")),
+        ]
+        with (
+            patch.object(
+                staging_e2e.secrets,
+                "token_hex",
+                side_effect=[trace_id, span_id],
+            ),
+            patch.object(staging_e2e, "urlopen", side_effect=responses) as urlopen,
+        ):
+            staging_e2e.run_staging_e2e("https://staging", timeout_seconds=1)
+
+        requests = [call.args[0] for call in urlopen.call_args_list]
+        self.assertEqual(len(requests), 2)
+        self.assertEqual(
+            [request.get_header("User-agent") for request in requests],
+            ["TheLake-Staging-E2E/1.0"] * 2,
+        )
+
     def test_payload_carries_the_trace_and_session_identity(self):
         payload = staging_e2e.trace_payload(
             "a" * 32,
