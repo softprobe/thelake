@@ -163,7 +163,8 @@ mod tests {
             timestamp TIMESTAMP_NS NOT NULL\
         );";
         let ddl = otlp_create_table_ddl(&conn, base_ddl, "traces").expect("build DDL");
-        conn.execute_batch(&ddl).expect("CREATE TABLE with DDL options");
+        conn.execute_batch(&ddl)
+            .expect("CREATE TABLE with DDL options");
         assert!(
             crate::storage::schema::ducklake_partition::table_partition_sort_matches(
                 &conn,
