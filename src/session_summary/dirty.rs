@@ -243,6 +243,24 @@ impl SessionSummaryDirty {
     }
 }
 
+impl crate::ingest::SpanCommitHook for SessionSummaryDirty {
+    fn prepare(&self, batches: &[Vec<Span>]) -> Option<crate::ingest::CommitWrite> {
+        let hints = fold_dirty_hints(
+            batches
+                .iter()
+                .flatten()
+                .filter(|span| self.allow_span(span)),
+        );
+        if hints.is_empty() {
+            return None;
+        }
+        let dirty = self.clone();
+        Some(Box::pin(async move {
+            dirty.apply_hints(&hints).await;
+        }))
+    }
+}
+
 #[cfg(test)]
 mod fold_tests {
     use super::*;

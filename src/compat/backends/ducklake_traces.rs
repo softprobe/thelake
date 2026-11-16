@@ -23,11 +23,25 @@ use std::sync::Arc;
 
 pub struct DuckLakeTraceBackend {
     query: Arc<QueryEngine>,
+    tag_index: Option<crate::tag_index::TagIndexReader>,
 }
 
 impl DuckLakeTraceBackend {
     pub fn new(query: Arc<QueryEngine>) -> Self {
-        Self { query }
+        Self {
+            query,
+            tag_index: None,
+        }
+    }
+
+    pub fn with_tag_index(
+        query: Arc<QueryEngine>,
+        tag_index: crate::tag_index::TagIndexReader,
+    ) -> Self {
+        Self {
+            query,
+            tag_index: Some(tag_index),
+        }
     }
 
     async fn execute(
@@ -287,6 +301,21 @@ impl DuckLakeTraceBackend {
     }
 }
 
+async fn try_read_tag_index(
+    tag_index: Option<&crate::tag_index::TagIndexReader>,
+    max_series: usize,
+) -> Option<Vec<String>> {
+    let reader = tag_index?;
+    match reader.list(max_series).await {
+        Ok(tags) if !tags.is_empty() => Some(tags),
+        Ok(_) => None,
+        Err(err) => {
+            tracing::warn!(error = %err, "tag_index read failed; falling back to DuckLake scan");
+            None
+        }
+    }
+}
+
 #[async_trait]
 impl TraceQueryBackend for DuckLakeTraceBackend {
     async fn get_trace(
@@ -414,6 +443,11 @@ impl TraceQueryBackend for DuckLakeTraceBackend {
         if let (Some(start), Some(end)) = (bounds.start_ns, bounds.end_ns) {
             if start == end {
                 return Ok(Vec::new());
+            }
+        }
+        if bounds.start_ns.is_none() && bounds.end_ns.is_none() {
+            if let Some(tags) = try_read_tag_index(self.tag_index.as_ref(), ctx.limits.max_series).await {
+                return Ok(tags);
             }
         }
         let trusted = tag_names_map_keys_sql(bounds.start_ns, bounds.end_ns, ctx.limits.max_series)
@@ -1708,5 +1742,76 @@ mod tests {
         };
         let sql = trace_scan_sql(request.scan_params(), None).expect("default lookback");
         assert_sql_has_otlp_time_predicates(sql.as_str());
+    }
+
+    #[tokio::test]
+    async fn try_read_tag_index_returns_none_when_absent_or_unreachable() {
+        assert!(try_read_tag_index(None, 100).await.is_none());
+
+        let mut pg = tokio_postgres::Config::new();
+        pg.host("127.0.0.1");
+        pg.port(1);
+        pg.dbname("x");
+        pg.user("x");
+        let mgr = deadpool_postgres::Manager::from_config(
+            pg,
+            tokio_postgres::NoTls,
+            deadpool_postgres::ManagerConfig {
+                recycling_method: deadpool_postgres::RecyclingMethod::Fast,
+            },
+        );
+        let pool = deadpool_postgres::Pool::builder(mgr)
+            .max_size(1)
+            .build()
+            .unwrap();
+        let reader = crate::tag_index::TagIndexReader::new(pool, "s", "ws");
+        assert!(try_read_tag_index(Some(&reader), 100).await.is_none());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires ducklake-postgres; make test-lease-pg / make test-e2e"]
+    async fn postgres_try_read_tag_index_returns_none_when_empty_and_some_when_populated() {
+        let schema = "thelake_tag_idx_backend_test";
+        let mut pg = tokio_postgres::Config::new();
+        pg.host("localhost");
+        pg.port(5432);
+        pg.dbname("ducklake");
+        pg.user("ducklake");
+        pg.password("ducklake");
+        let mgr = deadpool_postgres::Manager::from_config(
+            pg,
+            tokio_postgres::NoTls,
+            deadpool_postgres::ManagerConfig {
+                recycling_method: deadpool_postgres::RecyclingMethod::Fast,
+            },
+        );
+        let pool = deadpool_postgres::Pool::builder(mgr)
+            .max_size(2)
+            .build()
+            .unwrap();
+        let client = pool.get().await.expect("ducklake-postgres required");
+        crate::tag_index::ensure_tag_index_table(&client, schema)
+            .await
+            .unwrap();
+        client
+            .execute(&format!("TRUNCATE \"{schema}\".tag_index"), &[])
+            .await
+            .unwrap();
+
+        let reader = crate::tag_index::TagIndexReader::new(pool.clone(), schema, "ws-backend");
+        assert!(try_read_tag_index(Some(&reader), 100).await.is_none());
+
+        let writer = crate::tag_index::TagIndexWriter::new(pool, schema, "ws-backend");
+        writer
+            .upsert_entries(&[crate::tag_index::TagEntry {
+                tag: "http.method".into(),
+                last_seen_ns: 42,
+            }])
+            .await
+            .unwrap();
+        assert_eq!(
+            try_read_tag_index(Some(&reader), 100).await,
+            Some(vec!["http.method".to_string()])
+        );
     }
 }
