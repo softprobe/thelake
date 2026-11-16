@@ -120,21 +120,27 @@ impl QueryCancelToken {
             if let Ok(rt) = tokio::runtime::Handle::try_current() {
                 let inner = Arc::clone(&self.inner);
                 rt.spawn(async move {
-                    let mut ticker = tokio::time::interval(Duration::from_millis(5));
-                    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-                    ticker.tick().await;
+                    let mut delay = Duration::from_millis(5);
                     while !inner.done.load(Ordering::Acquire) {
-                        ticker.tick().await;
+                        tokio::time::sleep(delay).await;
+                        if inner.done.load(Ordering::Acquire) {
+                            break;
+                        }
                         let active = lock_ignoring_poison(&inner.active_interrupt);
                         let Some(ref handle) = *active else {
                             break;
                         };
                         handle.interrupt();
+                        delay = next_cancel_backoff_delay(delay);
                     }
                 });
             }
         }
     }
+}
+
+fn next_cancel_backoff_delay(current: Duration) -> Duration {
+    current.saturating_mul(2).min(Duration::from_millis(50))
 }
 
 struct MarkDoneOnDrop {
@@ -947,5 +953,24 @@ fn run_slot(
     drop(ready);
     while let Some(job) = jobs.blocking_recv() {
         job(&mut slot);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cancel_backoff_doubles_from_5ms_and_caps_at_50ms() {
+        let d1 = next_cancel_backoff_delay(Duration::from_millis(5));
+        let d2 = next_cancel_backoff_delay(d1);
+        let d3 = next_cancel_backoff_delay(d2);
+        let d4 = next_cancel_backoff_delay(d3);
+        let d5 = next_cancel_backoff_delay(d4);
+        assert_eq!(d1, Duration::from_millis(10));
+        assert_eq!(d2, Duration::from_millis(20));
+        assert_eq!(d3, Duration::from_millis(40));
+        assert_eq!(d4, Duration::from_millis(50));
+        assert_eq!(d5, Duration::from_millis(50));
     }
 }
