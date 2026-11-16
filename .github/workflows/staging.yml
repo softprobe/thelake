@@ -1,0 +1,265 @@
+name: Deploy TheLake staging
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: thelake-staging
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_branch == 'main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    outputs:
+      image_tag: ${{ steps.image.outputs.image_tag }}
+    env:
+      CI: "true"
+      CARGO_INCREMENTAL: "0"
+      DUCKDB_DOWNLOAD_LIB: "1"
+
+    steps:
+      - name: Pre-clean workspace permissions
+        run: |
+          set -euo pipefail
+          WS="${GITHUB_WORKSPACE:-$PWD}"
+          if [[ -d "$WS" ]]; then
+            sudo rm -rf "$WS/warehouse" || true
+            sudo chown -R "$(id -u):$(id -g)" "$WS" || true
+          fi
+
+      - name: Check out the CI commit
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+
+      - name: Set up Node.js for the embedded Explorer
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: packages/thelake-explorer/package-lock.json
+
+      - name: Set up Go for thelake-collector
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+          cache-dependency-path: collector/go.sum
+
+      - name: Restore build cache
+        uses: ./.github/actions/thelake-cache
+
+      - name: Bootstrap ubuntu runner
+        uses: ./.github/actions/ubuntu-runner
+
+      - name: Doctor
+        run: make doctor
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: softprobe
+          password: ${{ secrets.DOCKER_HUB_PASSWORD }}
+
+      - name: Set the staging image tag
+        id: image
+        env:
+          WORKFLOW_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: echo "image_tag=staging-${WORKFLOW_SHA}" >> "$GITHUB_OUTPUT"
+
+      - name: Build TheLake release image
+        run: make build-release
+
+      - name: Publish both staging images
+        env:
+          IMAGE_TAG: ${{ steps.image.outputs.image_tag }}
+        run: |
+          set -euo pipefail
+          make publish TAG="${IMAGE_TAG}" TAG_LATEST=0
+          make publish-collector TAG="${IMAGE_TAG}" TAG_LATEST=0
+          docker buildx imagetools inspect "softprobe/thelake:${IMAGE_TAG}" >/dev/null
+          docker buildx imagetools inspect "softprobe/thelake-collector:${IMAGE_TAG}" >/dev/null
+
+  deploy:
+    needs: publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      deployed: ${{ steps.freshness.outputs.deployed }}
+      source_sha: ${{ steps.release.outputs.source_sha }}
+    env:
+      IMAGE_TAG: ${{ needs.publish.outputs.image_tag }}
+
+    steps:
+      - name: Check out deployment configuration
+        uses: actions/checkout@v5
+        with:
+          repository: softprobe/deployment-k8s
+          ref: main
+          path: deployment-k8s
+          token: ${{ secrets.GH_PAT }}
+
+      - name: Validate image tag
+        id: release
+        run: |
+          set -euo pipefail
+          if [[ ! "${IMAGE_TAG}" =~ ^staging-([0-9a-f]{40})$ ]]; then
+            echo "::error::invalid TheLake staging image tag: ${IMAGE_TAG}"
+            exit 1
+          fi
+          echo "source_sha=${BASH_REMATCH[1]}" >> "$GITHUB_OUTPUT"
+
+      - name: Check out the image source history
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ steps.release.outputs.source_sha }}
+          path: thelake
+          fetch-depth: 0
+
+      - name: Confirm both Docker Hub tags exist
+        run: |
+          set -euo pipefail
+          for image in softprobe/thelake softprobe/thelake-collector; do
+            url="https://hub.docker.com/v2/repositories/${image}/tags/${IMAGE_TAG}"
+            found=0
+            for attempt in $(seq 1 30); do
+              if curl -fsS --max-time 10 "${url}" >/dev/null 2>&1; then
+                found=1
+                break
+              fi
+              echo "Waiting for ${image}:${IMAGE_TAG} on Docker Hub (${attempt}/30)."
+              sleep 5
+            done
+            if [[ "${found}" != 1 ]]; then
+              echo "::error::Docker Hub does not have ${image}:${IMAGE_TAG}"
+              exit 1
+            fi
+          done
+
+      - name: Skip an older image source
+        id: freshness
+        env:
+          SOURCE_SHA: ${{ steps.release.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+          manifest="deployment-k8s/gcp/staging/sp-llm/thelake.yaml"
+          app_tag=$(sed -nE 's/^[[:space:]]*image:[[:space:]]*softprobe\/thelake:([^[:space:]#]+).*$/\1/p' "$manifest")
+          collector_tag=$(sed -nE 's/^[[:space:]]*image:[[:space:]]*softprobe\/thelake-collector:([^[:space:]#]+).*$/\1/p' "$manifest")
+          if [[ -z "${app_tag}" || "${app_tag}" != "${collector_tag}" ]]; then
+            echo "::error::TheLake staging image pins are missing or do not match"
+            exit 1
+          fi
+
+          if [[ "${app_tag}" =~ ^staging-([0-9a-f]{40})$ ]]; then
+            current_sha="${BASH_REMATCH[1]}"
+            if [[ "${current_sha}" != "${SOURCE_SHA}" ]] && \
+              git -C thelake merge-base --is-ancestor "${SOURCE_SHA}" "${current_sha}"; then
+              echo "TheLake staging already points to a newer commit ${current_sha}."
+              echo "deployed=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            if ! git -C thelake merge-base --is-ancestor "${current_sha}" "${SOURCE_SHA}"; then
+              echo "::error::TheLake staging image sources do not share main history"
+              exit 1
+            fi
+          fi
+
+          echo "deployed=true" >> "$GITHUB_OUTPUT"
+
+      - name: Test manifest updater
+        if: steps.freshness.outputs.deployed == 'true'
+        working-directory: deployment-k8s
+        run: python3 scripts/test_update_thelake_staging_image.py
+
+      - name: Update GitOps image pins
+        if: steps.freshness.outputs.deployed == 'true'
+        working-directory: deployment-k8s
+        run: python3 scripts/update_thelake_staging_image.py "${IMAGE_TAG}"
+
+      - name: Commit the GitOps image pins
+        if: steps.freshness.outputs.deployed == 'true'
+        working-directory: deployment-k8s
+        env:
+          GH_PAT: ${{ secrets.GH_PAT }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add gcp/staging/sp-llm/thelake.yaml
+          if git diff --cached --quiet; then
+            echo "The GitOps manifest already records ${IMAGE_TAG}."
+            exit 0
+          fi
+          git commit -m "chore(staging): deploy TheLake ${IMAGE_TAG} (Refs softprobe/dev#199)"
+          git push origin HEAD:main
+
+      - name: Authenticate to Google Cloud
+        if: steps.freshness.outputs.deployed == 'true'
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SERVICE_ACCOUNT_JSON_KEY }}
+
+      - name: Get GKE credentials
+        if: steps.freshness.outputs.deployed == 'true'
+        uses: google-github-actions/get-gke-credentials@v2
+        with:
+          cluster_name: sp-k8s-1-autopilot-cluster
+          location: us-central1
+          project_id: cs-poc-sasxbttlzroculpau4u6e2l
+
+      - name: Apply staging manifests without Secrets
+        if: steps.freshness.outputs.deployed == 'true'
+        working-directory: deployment-k8s
+        run: |
+          set -euo pipefail
+          kubectl kustomize gcp/staging/ > /tmp/staging-all.yaml
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          documents = Path("/tmp/staging-all.yaml").read_text().split("\n---\n")
+          kept = [
+              document
+              for document in documents
+              if not re.search(r"^kind:\s*Secret\b", document, re.MULTILINE)
+          ]
+          Path("/tmp/staging-apply.yaml").write_text("\n---\n".join(kept))
+          PY
+          kubectl apply -f /tmp/staging-apply.yaml
+          kubectl -n staging delete deployment/thelake-collector service/thelake-collector --ignore-not-found
+          kubectl -n staging rollout status deployment/thelake --timeout=5m
+
+      - name: Confirm the deployed image tags
+        if: steps.freshness.outputs.deployed == 'true'
+        run: |
+          set -euo pipefail
+          app_image=$(kubectl -n staging get deployment/thelake -o jsonpath='{.spec.template.spec.containers[?(@.name=="thelake")].image}')
+          collector_image=$(kubectl -n staging get deployment/thelake -o jsonpath='{.spec.template.spec.containers[?(@.name=="thelake-collector")].image}')
+          test "${app_image}" = "softprobe/thelake:${IMAGE_TAG}"
+          test "${collector_image}" = "softprobe/thelake-collector:${IMAGE_TAG}"
+
+  staging-e2e:
+    needs: deploy
+    if: needs.deploy.outputs.deployed == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out the deployed TheLake source
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.deploy.outputs.source_sha }}
+
+      - name: Verify staging trace persistence
+        run: make test-staging-e2e
