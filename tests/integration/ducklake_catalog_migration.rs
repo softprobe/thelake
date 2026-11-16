@@ -1,8 +1,11 @@
 use chrono::{Duration, Utc};
 use softprobe_runtime::ingest::IngestEngine;
 use softprobe_runtime::models::{Log, Score, ScoreConfig, ScoreDataType, ScoreSource, Span};
-use softprobe_runtime::query;
-use softprobe_runtime::storage::ducklake::migrate_ducklake_catalog_from_config;
+use softprobe_runtime::query::{self, LogCountFilter, TraceCountFilter};
+use softprobe_runtime::sql::QueryWindow;
+use softprobe_runtime::storage::ducklake::{
+    migrate_ducklake_catalog_from_config, open_attached_from_config,
+};
 use std::collections::HashMap;
 use tempfile::TempDir;
 use tokio_postgres::NoTls;
@@ -17,8 +20,6 @@ const HAS_ROW_GROUP_COUNT_SQL: &str =
     include_str!("../fixtures/ducklake_catalog_migration_has_row_group_count.sql");
 const ROW_GROUP_COUNT_SQL: &str =
     include_str!("../fixtures/ducklake_catalog_migration_row_group_count.sql");
-const TABLE_COUNT_SQL: &str =
-    include_str!("../fixtures/ducklake_catalog_migration_table_count.sql");
 const MIN_TRACE_ID_SQL: &str =
     include_str!("../fixtures/ducklake_catalog_migration_min_trace_id.sql");
 
@@ -137,7 +138,8 @@ async fn automatic_migration_upgrades_postgres_catalog_to_1_1_and_preserves_read
     let mut config = file_backed_test_config(&temp);
     config.ducklake.data_inlining_row_limit = Some(0);
 
-    let start = (Utc::now() - Duration::minutes(5)).to_rfc3339();
+    let start_ts = Utc::now() - Duration::minutes(5);
+    let start = start_ts.to_rfc3339();
     let pipeline = IngestEngine::bound_default(&config)
         .await
         .expect("pipeline");
@@ -146,6 +148,8 @@ async fn automatic_migration_upgrades_postgres_catalog_to_1_1_and_preserves_read
     let trace_1 = format!("mig-tr-1-{}", Uuid::new_v4());
     let cfg_1 = format!("mig-cfg-1-{}", Uuid::new_v4());
     let score_1 = format!("mig-sc-1-{}", Uuid::new_v4());
+    let sc1 = sample_score(&score_1, &trace_1, &cfg_1);
+    let sc1_ts = sc1.timestamp;
 
     pipeline
         .add_spans(vec![sample_span(&session_1, &trace_1, "sp-1", "before")], 0)
@@ -163,7 +167,7 @@ async fn automatic_migration_upgrades_postgres_catalog_to_1_1_and_preserves_read
         .await
         .expect("ingest pre-migration score_config");
     pipeline
-        .add_scores(vec![sample_score(&score_1, &trace_1, &cfg_1)])
+        .add_scores(vec![sc1])
         .await
         .expect("ingest pre-migration score");
 
@@ -217,6 +221,8 @@ async fn automatic_migration_upgrades_postgres_catalog_to_1_1_and_preserves_read
     let trace_2 = format!("mig-tr-2-{}", Uuid::new_v4());
     let cfg_2 = format!("mig-cfg-2-{}", Uuid::new_v4());
     let score_2 = format!("mig-sc-2-{}", Uuid::new_v4());
+    let sc2 = sample_score(&score_2, &trace_2, &cfg_2);
+    let sc2_ts = sc2.timestamp;
 
     pipeline
         .add_spans(vec![sample_span(&session_2, &trace_2, "sp-2", "after")], 0)
@@ -234,31 +240,67 @@ async fn automatic_migration_upgrades_postgres_catalog_to_1_1_and_preserves_read
         .await
         .expect("ingest post-migration score_config");
     pipeline
-        .add_scores(vec![sample_score(&score_2, &trace_2, &cfg_2)])
+        .add_scores(vec![sc2])
         .await
         .expect("ingest post-migration score");
 
-    let end = (Utc::now() + Duration::minutes(5)).to_rfc3339();
+    let end_ts = Utc::now() + Duration::minutes(5);
+    let end = end_ts.to_rfc3339();
+    let window = QueryWindow::try_new(start_ts, end_ts).expect("query window");
     let query_engine = query::create_query_engine(&config)
         .await
         .expect("query engine");
 
-    for (table, expected_count) in [
-        ("traces", 2_i64),
-        ("logs", 2_i64),
-        ("scores", 2_i64),
-        ("score_configs", 2_i64),
-    ] {
-        let sql = TABLE_COUNT_SQL
-            .replace("{{TABLE}}", table)
-            .replace("{{START}}", &start)
-            .replace("{{END}}", &end);
-        let res = query_engine
-            .execute_query(&sql)
+    let trace_count = query_engine
+        .count_traces(TraceCountFilter {
+            time_window: window,
+            session_id: None,
+            app_id: None,
+            span_id: None,
+        })
+        .await
+        .expect("count traces after migration");
+    assert_eq!(trace_count, 2);
+
+    let log_count = query_engine
+        .count_logs(LogCountFilter {
+            time_window: window,
+            session_id: None,
+            trace_id: None,
+            body: None,
+        })
+        .await
+        .expect("count logs after migration");
+    assert_eq!(log_count, 2);
+
+    assert!(
+        query_engine
+            .score_exists(&score_1, sc1_ts)
             .await
-            .unwrap_or_else(|e| panic!("query {table} after migration: {e}"));
-        assert_eq!(res.rows[0][0].as_i64(), Some(expected_count), "{table}");
-    }
+            .expect("pre-migration score exists"),
+        "pre-migration score missing"
+    );
+    assert!(
+        query_engine
+            .score_exists(&score_2, sc2_ts)
+            .await
+            .expect("post-migration score exists"),
+        "post-migration score missing"
+    );
+    assert!(
+        query_engine
+            .score_config_exists(&cfg_1)
+            .await
+            .expect("pre-migration score_config exists"),
+        "pre-migration score_config missing"
+    );
+    assert!(
+        query_engine
+            .score_config_exists(&cfg_2)
+            .await
+            .expect("post-migration score_config exists"),
+        "post-migration score_config missing"
+    );
 
     let populated_row_groups: i64 = pg
         .query_one(
@@ -273,13 +315,12 @@ async fn automatic_migration_upgrades_postgres_catalog_to_1_1_and_preserves_read
         "expected row_group_count > 0 on post-migration Parquet files"
     );
 
+    let attached = open_attached_from_config(&config.ducklake, Some(0));
     let min_sql = MIN_TRACE_ID_SQL
         .replace("{{START}}", &start)
         .replace("{{END}}", &end);
-    let min_res = query_engine
-        .execute_query(&min_sql)
-        .await
+    let exact_trace_min: String = attached
+        .query_row(&min_sql, [], |r| r.get(0))
         .expect("MIN(trace_id)");
-    let exact_trace_min = min_res.rows[0][0].as_str().expect("string min").to_string();
     assert_eq!(exact_trace_min, trace_1.clone().min(trace_2.clone()));
 }
