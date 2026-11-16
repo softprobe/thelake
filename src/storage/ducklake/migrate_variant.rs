@@ -379,7 +379,11 @@ pub fn migrate_ducklake_tables(
     validate_pg_ident(src_schema)?;
     validate_pg_ident(dst_schema)?;
 
-    let conn = Connection::open_in_memory().context("open DuckDB for migration")?;
+    let duckdb_cfg = duckdb::Config::default()
+        .allow_unsigned_extensions()
+        .context("enable unsigned extensions for ducklake")?;
+    let conn =
+        Connection::open_in_memory_with_flags(duckdb_cfg).context("open DuckDB for migration")?;
     let ext_path = Path::new(&config.ducklake.extension_path);
     conn.execute_batch(&sql_templates::render_ducklake_init_sql(
         &escape_sql_literal(&ext_path.to_string_lossy()),
