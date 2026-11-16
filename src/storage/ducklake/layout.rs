@@ -143,7 +143,10 @@ mod tests {
         let meta = tmp.path().join("meta.ducklake");
         let data = tmp.path().join("data");
         std::fs::create_dir_all(&data).expect("create data dir");
-        let conn = Connection::open_in_memory().expect("open DuckDB");
+        let cfg = duckdb::Config::default()
+            .with("allow_unsigned_extensions", "true")
+            .expect("duckdb config");
+        let conn = Connection::open_in_memory_with_flags(cfg).expect("open DuckDB");
         let ext = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("target/ducklake-extension/ducklake.duckdb_extension");
         conn.execute_batch(&format!(

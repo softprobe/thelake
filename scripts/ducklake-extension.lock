@@ -1,5 +1,9 @@
-repository extensions.duckdb.org
-release v2.0.0
+# Temporarily pinned to softprobe/ducklake (built from duckdb/ducklake v2.0-cyanoptera)
+# because official extensions.duckdb.org/v2.0.0/ is stuck at 417a9117f5 (2026-10-19),
+# which predates duckdb/ducklake#1824 (Postgres TIMESTAMP_NS pruning fix).
+# Switch back to extensions.duckdb.org once v2.0.0 is updated: https://github.com/softprobe/dev/issues/197
+repository softprobe/ducklake
+release duckdb-v2.0.0-27133a83f177
 duckdb_version 2.0.0
-linux_amd64 ff1c730a5d5a7cb14ed9547ba15c259c24805eb4cf12c17727c2a4faffe1ada7 4b497cf95d768004d34a97e7098d33f687e994dc523945948c321af25061b39b
-osx_arm64 493c618c0ae5998409145f8467a885e70ef9d3b6312934b86b306817b27dd38c 78736bf48c045548444dd31ce8e5176dfbcb8df4eb58d8518ce93cb40c3a39bc
+linux_amd64 8855d90b632b27268b7dd666b79135e5bfb9c59c32ed7625a762abd3315cee28 21047125799a1ebb3ac977509a7f079ef7ec1fd2f3f79e75da54a3432bba17cc
+osx_arm64 9d667a354ffe28f31bbabf0d793ce0bb600d31f28afd9444c5bc4b63ece2b43b 52ccbd3c18b8d071a65e49634f56b5ecd22222c10eac075c32555194ee7b5b5e

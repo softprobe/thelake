@@ -338,6 +338,7 @@ pub fn open_attached_from_config(
     open_attached_connection(
         &PhysicalScope::from_ducklake(config),
         data_inlining_row_limit,
+        Some(&config.extension_path),
     )
 }
 
@@ -351,9 +352,11 @@ pub fn open_attached_from_warehouse(
     catalog_alias: impl Into<String>,
     data_inlining_row_limit: Option<u64>,
 ) -> AttachedSession {
+    let default_ext = crate::config::DuckLakeConfig::default().extension_path;
     open_attached_connection(
         &PhysicalScope::new(metadata_path, data_path, catalog_alias, metadata_schema),
         data_inlining_row_limit,
+        Some(&default_ext),
     )
 }
 
@@ -362,13 +365,12 @@ pub fn open_attached_from_warehouse(
 pub(crate) fn open_attached_connection(
     scope: &PhysicalScope,
     data_inlining_row_limit: Option<u64>,
+    extension_path: Option<&str>,
 ) -> AttachedSession {
     let connection = open_in_memory_capped(QUERY_DUCKDB_THREADS, "512MB").expect("duckdb");
-    apply_duckdb_init(
-        &connection,
-        &DuckDbInitParams::session(QUERY_DUCKDB_THREADS, "512MB"),
-    )
-    .expect("DuckDB init");
+    let mut init_params = DuckDbInitParams::session(QUERY_DUCKDB_THREADS, "512MB");
+    init_params.ducklake_extension_path = extension_path.map(Path::new);
+    apply_duckdb_init(&connection, &init_params).expect("DuckDB init");
     let warehouse = scope.warehouse_uri();
     if warehouse.contains("://") {
         let mut config = crate::config::Config::default();
