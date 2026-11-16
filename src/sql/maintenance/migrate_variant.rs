@@ -7,6 +7,7 @@ const TABLE_COUNT_SQL: &str = include_str!("migrate_variant/table_count.sql");
 const PG_COPY_TABLE_SQL: &str = include_str!("migrate_variant/pg_copy_table.sql");
 const DUCKLAKE_INIT_SQL: &str = include_str!("migrate_variant/ducklake_init.sql");
 const DUCKLAKE_ATTACH_SQL: &str = include_str!("migrate_variant/ducklake_attach.sql");
+const DUCKLAKE_TABLE_EXISTS_SQL: &str = include_str!("migrate_variant/ducklake_table_exists.sql");
 const DUCKLAKE_DISTINCT_DAYS_SQL: &str = include_str!("migrate_variant/ducklake_distinct_days.sql");
 const DUCKLAKE_DAY_COUNT_SQL: &str = include_str!("migrate_variant/ducklake_day_count.sql");
 const DUCKLAKE_INSERT_DAY_SQL: &str = include_str!("migrate_variant/ducklake_insert_day.sql");
@@ -67,6 +68,10 @@ pub(crate) fn render_pg_copy_table_sql(
 
 pub(crate) fn render_ducklake_init_sql(ext_path: &str) -> String {
     DUCKLAKE_INIT_SQL.replace("{{ext_path}}", ext_path)
+}
+
+pub(crate) fn ducklake_table_exists_sql() -> &'static str {
+    DUCKLAKE_TABLE_EXISTS_SQL
 }
 
 pub(crate) fn render_ducklake_attach_sql(
