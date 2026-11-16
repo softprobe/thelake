@@ -14,9 +14,10 @@ use crate::sql::promotion_stats::{
 use crate::sql::telemetry::{TelemetryFilterExpr, TelemetrySearchRequest};
 use crate::workspace::WorkspaceContext;
 use anyhow::Result;
+use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
-use std::sync::{OnceLock, RwLock};
+use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const MAX_TRACKED_KEYS_PER_TABLE: usize = 512;
@@ -112,13 +113,19 @@ pub struct TrackedAttributeUsage {
 
 #[derive(Debug, Default)]
 pub struct AttrUsageTracker {
-    workspaces: RwLock<HashMap<String, HashMap<UsageKey, AttrUsageStats>>>,
+    workspaces: DashMap<String, Mutex<HashMap<UsageKey, AttrUsageStats>>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UsageKind {
     Filter,
     GroupBy,
+}
+
+fn eviction_priority(stats: &AttrUsageStats, now_sec: u64) -> u64 {
+    let age_hours = now_sec.saturating_sub(stats.last_seen_epoch_sec) as f64 / 3600.0;
+    let decayed = (stats.query_count as f64 / (1.0 + age_hours)).max(0.0);
+    (decayed * 1000.0) as u64
 }
 
 impl AttrUsageTracker {
@@ -134,41 +141,77 @@ impl AttrUsageTracker {
         attribute_key: &str,
         kind: UsageKind,
     ) {
-        let key = attribute_key.trim();
-        if workspace_key.trim().is_empty()
-            || key.is_empty()
-            || is_intrinsic_or_builtin_key(table, key)
-        {
+        self.record_request_batch(workspace_key, [(table, source, attribute_key, kind)]);
+    }
+
+    /// Record attribute accesses for a single query, incrementing `query_count` at most once per
+    /// `(table, source, attribute_key)` regardless of how many clauses reference it.
+    pub fn record_request_batch<'a>(
+        &self,
+        workspace_key: &str,
+        entries: impl IntoIterator<
+            Item = (
+                RecommendationTable,
+                RecommendationSource,
+                &'a str,
+                UsageKind,
+            ),
+        >,
+    ) {
+        if workspace_key.trim().is_empty() {
+            return;
+        }
+        let mut per_key: HashMap<UsageKey, (bool, bool)> = HashMap::new();
+        for (table, source, raw_key, kind) in entries {
+            let key = raw_key.trim();
+            if key.is_empty() || is_intrinsic_or_builtin_key(table, key) {
+                continue;
+            }
+            let usage_key = UsageKey {
+                table,
+                source,
+                attribute_key: key.to_string(),
+            };
+            let flags = per_key.entry(usage_key).or_insert((false, false));
+            match kind {
+                UsageKind::Filter => flags.0 = true,
+                UsageKind::GroupBy => flags.1 = true,
+            }
+        }
+        if per_key.is_empty() {
             return;
         }
         let now_sec = epoch_seconds_now();
-        let mut guard = self.workspaces.write().expect("usage lock poisoned");
-        let table_map = guard.entry(workspace_key.to_string()).or_default();
-        let usage_key = UsageKey {
-            table,
-            source,
-            attribute_key: key.to_string(),
-        };
-        if !table_map.contains_key(&usage_key) {
-            let table_entries = table_map.keys().filter(|k| k.table == table).count();
-            if table_entries >= MAX_TRACKED_KEYS_PER_TABLE {
-                if let Some(evict_key) = table_map
-                    .iter()
-                    .filter(|(k, _)| k.table == table)
-                    .min_by_key(|(_, v)| (v.query_count, v.last_seen_epoch_sec))
-                    .map(|(k, _)| k.clone())
-                {
-                    table_map.remove(&evict_key);
+        let shard = self
+            .workspaces
+            .entry(workspace_key.to_string())
+            .or_insert_with(|| Mutex::new(HashMap::new()));
+        let mut table_map = shard.lock().unwrap_or_else(|p| p.into_inner());
+        for (usage_key, (used_filter, used_group_by)) in per_key {
+            let table = usage_key.table;
+            if !table_map.contains_key(&usage_key) {
+                let table_entries = table_map.keys().filter(|k| k.table == table).count();
+                if table_entries >= MAX_TRACKED_KEYS_PER_TABLE {
+                    if let Some(evict_key) = table_map
+                        .iter()
+                        .filter(|(k, _)| k.table == table)
+                        .min_by_key(|(_, v)| (eviction_priority(v, now_sec), v.last_seen_epoch_sec))
+                        .map(|(k, _)| k.clone())
+                    {
+                        table_map.remove(&evict_key);
+                    }
                 }
             }
+            let stats = table_map.entry(usage_key).or_default();
+            stats.query_count = stats.query_count.saturating_add(1);
+            if used_filter {
+                stats.filter_count = stats.filter_count.saturating_add(1);
+            }
+            if used_group_by {
+                stats.group_by_count = stats.group_by_count.saturating_add(1);
+            }
+            stats.last_seen_epoch_sec = now_sec;
         }
-        let stats = table_map.entry(usage_key).or_default();
-        stats.query_count = stats.query_count.saturating_add(1);
-        match kind {
-            UsageKind::Filter => stats.filter_count = stats.filter_count.saturating_add(1),
-            UsageKind::GroupBy => stats.group_by_count = stats.group_by_count.saturating_add(1),
-        }
-        stats.last_seen_epoch_sec = now_sec;
     }
 
     pub fn record_tempo_search(
@@ -177,47 +220,38 @@ impl AttrUsageTracker {
         tags: &std::collections::BTreeMap<String, String>,
         selector: Option<&TraceSelector>,
     ) {
+        let mut batch = Vec::new();
         for tag_key in tags.keys() {
             let (source, attr_key) = classify_tempo_key(tag_key);
-            self.record(
-                workspace_key,
+            batch.push((
                 RecommendationTable::Traces,
                 source,
                 attr_key,
                 UsageKind::Filter,
-            );
+            ));
         }
         if let Some(sel) = selector {
-            record_trace_selector(self, workspace_key, sel);
+            collect_trace_selector_entries(sel, &mut batch);
         }
+        self.record_request_batch(workspace_key, batch);
     }
 
     pub fn record_telemetry_search(&self, workspace_key: &str, request: &TelemetrySearchRequest) {
+        let mut batch = Vec::new();
         if let Some(filter) = request.filter.as_ref() {
-            record_telemetry_filter(self, workspace_key, filter);
+            collect_telemetry_filter_entries(filter, &mut batch);
         }
         for col in &request.columns {
             if let Some((source, key)) = parse_prefixed_field(col) {
-                self.record(
-                    workspace_key,
-                    RecommendationTable::Traces,
-                    source,
-                    key,
-                    UsageKind::GroupBy,
-                );
+                batch.push((RecommendationTable::Traces, source, key, UsageKind::GroupBy));
             }
         }
         for sort in &request.sort {
             if let Some((source, key)) = parse_prefixed_field(&sort.field) {
-                self.record(
-                    workspace_key,
-                    RecommendationTable::Traces,
-                    source,
-                    key,
-                    UsageKind::GroupBy,
-                );
+                batch.push((RecommendationTable::Traces, source, key, UsageKind::GroupBy));
             }
         }
+        self.record_request_batch(workspace_key, batch);
     }
 
     pub fn record_logql_matchers(
@@ -226,24 +260,19 @@ impl AttrUsageTracker {
         matchers: &[LabelMatcher],
         parsed_filters: &[LabelMatcher],
     ) {
-        for matcher in matchers.iter().chain(parsed_filters.iter()) {
+        let batch = matchers.iter().chain(parsed_filters.iter()).map(|matcher| {
             let (source, key) = classify_log_label(&matcher.name);
-            self.record(
-                workspace_key,
-                RecommendationTable::Logs,
-                source,
-                key,
-                UsageKind::Filter,
-            );
-        }
+            (RecommendationTable::Logs, source, key, UsageKind::Filter)
+        });
+        self.record_request_batch(workspace_key, batch);
     }
 
     pub fn snapshot(&self, workspace_key: &str) -> Vec<TrackedAttributeUsage> {
-        let guard = self.workspaces.read().expect("usage lock poisoned");
-        let Some(map) = guard.get(workspace_key) else {
+        let Some(shard) = self.workspaces.get(workspace_key) else {
             return Vec::new();
         };
-        let mut out: Vec<_> = map
+        let table_map = shard.lock().unwrap_or_else(|p| p.into_inner());
+        let mut out: Vec<_> = table_map
             .iter()
             .map(|(k, v)| TrackedAttributeUsage {
                 table: k.table,
@@ -264,10 +293,14 @@ impl AttrUsageTracker {
     }
 }
 
-fn record_trace_selector(
-    tracker: &AttrUsageTracker,
-    workspace_key: &str,
-    selector: &TraceSelector,
+fn collect_trace_selector_entries<'a>(
+    selector: &'a TraceSelector,
+    out: &mut Vec<(
+        RecommendationTable,
+        RecommendationSource,
+        &'a str,
+        UsageKind,
+    )>,
 ) {
     match selector {
         TraceSelector::All => {}
@@ -283,58 +316,54 @@ fn record_trace_selector(
                 | TracePredicate::LessOrEqual(f, _) => f,
             };
             match field {
-                TraceField::Resource(key) => tracker.record(
-                    workspace_key,
+                TraceField::Resource(key) => out.push((
                     RecommendationTable::Traces,
                     RecommendationSource::ResourceAttribute,
                     key,
                     UsageKind::Filter,
-                ),
+                )),
                 TraceField::Span(key) | TraceField::Unscoped(key) => {
                     let (source, attr_key) = classify_tempo_key(key);
-                    tracker.record(
-                        workspace_key,
+                    out.push((
                         RecommendationTable::Traces,
                         source,
                         attr_key,
                         UsageKind::Filter,
-                    );
+                    ));
                 }
                 TraceField::Intrinsic(_) | TraceField::Instrumentation(_) => {}
             }
         }
         TraceSelector::And(lhs, rhs) | TraceSelector::Or(lhs, rhs) => {
-            record_trace_selector(tracker, workspace_key, lhs);
-            record_trace_selector(tracker, workspace_key, rhs);
+            collect_trace_selector_entries(lhs, out);
+            collect_trace_selector_entries(rhs, out);
         }
     }
 }
 
-fn record_telemetry_filter(
-    tracker: &AttrUsageTracker,
-    workspace_key: &str,
-    expr: &TelemetryFilterExpr,
+fn collect_telemetry_filter_entries<'a>(
+    expr: &'a TelemetryFilterExpr,
+    out: &mut Vec<(
+        RecommendationTable,
+        RecommendationSource,
+        &'a str,
+        UsageKind,
+    )>,
 ) {
     match expr {
         TelemetryFilterExpr::And { and } => {
             for item in and {
-                record_telemetry_filter(tracker, workspace_key, item);
+                collect_telemetry_filter_entries(item, out);
             }
         }
         TelemetryFilterExpr::Or { or } => {
             for item in or {
-                record_telemetry_filter(tracker, workspace_key, item);
+                collect_telemetry_filter_entries(item, out);
             }
         }
         TelemetryFilterExpr::Predicate(pred) => {
             if let Some((source, key)) = parse_prefixed_field(&pred.field) {
-                tracker.record(
-                    workspace_key,
-                    RecommendationTable::Traces,
-                    source,
-                    key,
-                    UsageKind::Filter,
-                );
+                out.push((RecommendationTable::Traces, source, key, UsageKind::Filter));
             }
         }
     }
@@ -374,6 +403,10 @@ fn classify_log_label(raw: &str) -> (RecommendationSource, &str) {
     let trimmed = raw.trim();
     if let Some(key) = trimmed.strip_prefix("resource.") {
         (RecommendationSource::ResourceAttribute, key)
+    } else if let Some(key) = trimmed.strip_prefix("resource_attributes.") {
+        (RecommendationSource::ResourceAttribute, key)
+    } else if trimmed == "service.name" || trimmed.starts_with("service.") {
+        (RecommendationSource::ResourceAttribute, trimmed)
     } else {
         (RecommendationSource::Attribute, trimmed)
     }
@@ -557,19 +590,31 @@ pub fn parse_promotion_data_type(raw: &str) -> Option<PromotionDataType> {
 
 pub fn estimate_scan_reduction_and_cost(stats: &CandidateStats) -> (f64, f64, &'static str) {
     if stats.sampled_rows == 0 || stats.non_null_count == 0 {
-        return (1.0, 15.0, "low");
+        return (1.0, 0.0, "low");
     }
     let non_null_ratio = stats.non_null_count as f64 / stats.sampled_rows as f64;
     let null_ratio = (1.0 - non_null_ratio).clamp(0.0, 1.0);
 
-    // Zone-map pruning effectiveness grows with distinct cardinality across row groups
-    // and drops when values are constant (cardinality <= 1) or overly wide strings.
-    let selectivity_factor = if stats.distinct_cardinality <= 1 {
+    // Zone-map pruning grows with moderate cardinality across row groups, but drops when values are
+    // constant (cardinality <= 1) or near-unique (UUID/request IDs appear in nearly every row group).
+    let base_selectivity = if stats.distinct_cardinality <= 1 {
         0.05
     } else {
         let card = stats.distinct_cardinality as f64;
         (1.0 - (1.0 / card)).clamp(0.1, 0.92)
     };
+    let uniqueness_penalty = if stats.non_null_count >= 20 {
+        let unique_ratio =
+            (stats.distinct_cardinality as f64 / stats.non_null_count as f64).clamp(0.0, 1.0);
+        if unique_ratio > 0.5 {
+            (1.0 - ((unique_ratio - 0.5) / 0.45) * 0.85).clamp(0.15, 1.0)
+        } else {
+            1.0
+        }
+    } else {
+        1.0
+    };
+    let selectivity_factor = base_selectivity * uniqueness_penalty;
     let width_cost = if stats.avg_value_bytes > 256.0 {
         "high"
     } else if stats.avg_value_bytes > 64.0 {
@@ -597,15 +642,12 @@ pub fn merge_column_into_active_manifest(
     active_manifests: &[TelemetryColumnsManifest],
     new_col: PromotionColumn,
 ) -> std::result::Result<String, PromotionValidationError> {
+    // Only supersede single-table manifests for `table`; multi-table `[traces, logs]` manifests stay
+    // active under their own `target_tables` key so approving a traces column never drops logs.
     let mut manifests_to_merge: Vec<TelemetryColumnsManifest> = active_manifests
         .iter()
-        .filter(|m| m.target.tables.contains(&table))
-        .map(|m| TelemetryColumnsManifest {
-            target: TelemetryColumnsTarget {
-                tables: vec![table.clone()],
-            },
-            columns: m.columns.clone(),
-        })
+        .filter(|m| m.target.tables == vec![table.clone()])
+        .cloned()
         .collect();
     manifests_to_merge.push(TelemetryColumnsManifest {
         target: TelemetryColumnsTarget {
@@ -711,13 +753,16 @@ pub async fn build_recommendations(
         let stats_vec =
             match compile_attribute_stats_query(table.to_stats_table(), start_ns, end_ns, &keys) {
                 Ok(sql) => {
-                    let result = ws.query().execute_trusted(sql).await.ok();
-                    parse_stats_result(result.as_ref(), candidates.len())
+                    let result = ws.query().execute_trusted(sql).await?;
+                    parse_stats_result(Some(&result), candidates.len())
                 }
                 Err(_) => parse_stats_result(None, candidates.len()),
             };
 
         for (candidate, stats) in candidates.into_iter().zip(stats_vec.into_iter()) {
+            if stats.sampled_rows == 0 || stats.non_null_count == 0 {
+                continue;
+            }
             let inferred_type = infer_promotion_data_type(&stats);
             let col_name = suggest_column_name(candidate.source, &candidate.attribute_key);
             let (null_ratio, estimated_scan_reduction_pct, schema_width_cost) =
@@ -1019,5 +1064,144 @@ columns:
         let snap = tracker.snapshot("ws-cap");
         assert_eq!(snap.len(), MAX_TRACKED_KEYS_PER_TABLE);
         assert!(!snap.iter().any(|u| u.attribute_key == "custom.key.0"));
+    }
+
+    #[test]
+    fn deduplicates_per_request_counts_and_classifies_log_resource_labels() {
+        let tracker = AttrUsageTracker::new();
+        let req = TelemetrySearchRequest {
+            version: 1,
+            scope: TelemetrySearchScope::Traces,
+            time_range: None,
+            filter: Some(TelemetryFilterExpr::Predicate(TelemetryFilter {
+                field: "attributes.tenant.tier".to_string(),
+                op: "eq".to_string(),
+                value: Some(serde_json::json!("pro")),
+            })),
+            columns: vec!["attributes.tenant.tier".to_string()],
+            sort: vec![TelemetrySort {
+                field: "attributes.tenant.tier".to_string(),
+                direction: TelemetrySortDirection::Asc,
+            }],
+            limit: None,
+            cursor: None,
+        };
+        tracker.record_telemetry_search("ws-dedup", &req);
+        tracker.record_logql_matchers(
+            "ws-dedup",
+            &[
+                LabelMatcher {
+                    name: "resource_attributes.deploy.env".to_string(),
+                    op: MatcherOp::Eq,
+                    value: "staging".to_string(),
+                },
+                LabelMatcher {
+                    name: "service.namespace".to_string(),
+                    op: MatcherOp::Eq,
+                    value: "checkout".to_string(),
+                },
+            ],
+            &[],
+        );
+
+        let snap = tracker.snapshot("ws-dedup");
+        let tier = snap
+            .iter()
+            .find(|u| u.attribute_key == "tenant.tier")
+            .expect("tenant.tier");
+        assert_eq!(tier.query_count, 1);
+        assert_eq!(tier.filter_count, 1);
+        assert_eq!(tier.group_by_count, 1);
+
+        let deploy_env = snap
+            .iter()
+            .find(|u| u.attribute_key == "deploy.env")
+            .expect("deploy.env");
+        assert_eq!(deploy_env.source, RecommendationSource::ResourceAttribute);
+
+        let svc_ns = snap
+            .iter()
+            .find(|u| u.attribute_key == "service.namespace")
+            .expect("service.namespace");
+        assert_eq!(svc_ns.source, RecommendationSource::ResourceAttribute);
+    }
+
+    #[test]
+    fn penalizes_unique_uuids_and_returns_zero_on_empty_stats() {
+        let (_, red_empty, _) = estimate_scan_reduction_and_cost(&CandidateStats {
+            sampled_rows: 0,
+            non_null_count: 0,
+            distinct_cardinality: 0,
+            avg_value_bytes: 0.0,
+            bool_count: 0,
+            int_count: 0,
+            double_count: 0,
+        });
+        assert_eq!(red_empty, 0.0);
+
+        let (_, red_moderate, _) = estimate_scan_reduction_and_cost(&CandidateStats {
+            sampled_rows: 1000,
+            non_null_count: 1000,
+            distinct_cardinality: 16,
+            avg_value_bytes: 12.0,
+            bool_count: 0,
+            int_count: 0,
+            double_count: 0,
+        });
+        let (_, red_uuid, _) = estimate_scan_reduction_and_cost(&CandidateStats {
+            sampled_rows: 1000,
+            non_null_count: 1000,
+            distinct_cardinality: 995,
+            avg_value_bytes: 36.0,
+            bool_count: 0,
+            int_count: 0,
+            double_count: 0,
+        });
+        assert!(red_moderate > red_uuid);
+    }
+
+    #[test]
+    fn multi_table_manifest_is_not_narrowed_when_merging_single_table_column() {
+        let multi = match parse_promotion_manifest(
+            r#"
+specVersion: softprobe.promotion.v1
+target:
+  kind: telemetry_columns
+  tables: [traces, logs]
+columns:
+  - name: attr_shared
+    type: string
+    nullable: true
+    source:
+      from: attribute
+      key: shared.key
+"#,
+        )
+        .expect("parse multi")
+        {
+            crate::promotion::PromotionManifest::TelemetryColumns(m) => m,
+            _ => unreachable!(),
+        };
+
+        let yaml = merge_column_into_active_manifest(
+            TelemetryTable::Traces,
+            &[multi],
+            PromotionColumn {
+                name: "attr_traces_only".to_string(),
+                data_type: PromotionDataType::String,
+                nullable: true,
+                source: PromotionSource::Attribute {
+                    key: "traces.only".to_string(),
+                },
+            },
+        )
+        .expect("merge");
+        let parsed = parse_promotion_manifest(&yaml).expect("valid");
+        let crate::promotion::PromotionManifest::TelemetryColumns(m) = parsed else {
+            panic!("expected TelemetryColumns");
+        };
+        assert_eq!(m.target.tables, vec![TelemetryTable::Traces]);
+        assert_eq!(m.columns.len(), 1);
+        assert_eq!(m.columns[0].name, "attr_traces_only");
     }
 }

@@ -95,13 +95,13 @@ pub(crate) fn compile_attribute_stats_query(
             "CAST(COALESCE(AVG(strlen({col_alias})), 0.0) AS DOUBLE) AS avg_bytes_{idx}"
         ));
         agg_projections.push(format!(
-            "CAST(COUNT(TRY_CAST({col_alias} AS BOOLEAN)) AS BIGINT) AS bool_{idx}"
+            "CAST(COUNT(CASE WHEN {col_alias} IN ('true', 'false') THEN 1 END) AS BIGINT) AS bool_{idx}"
         ));
         agg_projections.push(format!(
-            "CAST(COUNT(TRY_CAST({col_alias} AS BIGINT)) AS BIGINT) AS int_{idx}"
+            "CAST(COUNT(CASE WHEN TRY_CAST({col_alias} AS BIGINT) IS NOT NULL AND NOT regexp_matches({col_alias}, '^-?0[0-9]+$') THEN 1 END) AS BIGINT) AS int_{idx}"
         ));
         agg_projections.push(format!(
-            "CAST(COUNT(TRY_CAST({col_alias} AS DOUBLE)) AS BIGINT) AS double_{idx}"
+            "CAST(COUNT(CASE WHEN TRY_CAST({col_alias} AS DOUBLE) IS NOT NULL AND isfinite(TRY_CAST({col_alias} AS DOUBLE)) THEN 1 END) AS BIGINT) AS double_{idx}"
         ));
     }
 
