@@ -259,6 +259,14 @@ fn compile_trace_scan_sql(
     } else {
         ""
     };
+    let mut preserve_keys: std::collections::BTreeSet<String> =
+        params.tags.keys().cloned().collect();
+    if let Some(selector) = params.selector {
+        collect_selector_keys(selector, &mut preserve_keys);
+    }
+    let trimmed_attributes = trimmed_map_json_expr("attributes", &preserve_keys);
+    let trimmed_resource_attributes =
+        trimmed_map_json_expr("resource_attributes", &preserve_keys);
 
     Ok(window
         .scan_with_timestamp_filter("", |bound| {
@@ -275,8 +283,53 @@ fn compile_trace_scan_sql(
                 .replace("{{duration_predicate}}", &duration_predicate)
                 .replace("{{trace_limit}}", &trace_limit.to_string())
                 .replace("{{cap}}", &cap.to_string())
+                .replace("{{trimmed_attributes}}", &trimmed_attributes)
+                .replace("{{trimmed_resource_attributes}}", &trimmed_resource_attributes)
         })
         .into_sql())
+}
+
+fn collect_selector_keys(
+    selector: &TraceSelector,
+    keys: &mut std::collections::BTreeSet<String>,
+) {
+    match selector {
+        TraceSelector::All => {}
+        TraceSelector::And(left, right) | TraceSelector::Or(left, right) => {
+            collect_selector_keys(left, keys);
+            collect_selector_keys(right, keys);
+        }
+        TraceSelector::Predicate(predicate) => match predicate_field(predicate) {
+            TraceField::Span(key) | TraceField::Unscoped(key) | TraceField::Resource(key) => {
+                keys.insert(key.clone());
+            }
+            TraceField::Instrumentation(_) | TraceField::Intrinsic(_) => {}
+        },
+    }
+}
+
+fn trimmed_map_json_expr(
+    column: &str,
+    preserve_keys: &std::collections::BTreeSet<String>,
+) -> String {
+    let keep_predicate = if preserve_keys.is_empty() {
+        "e.value IS NULL OR length(e.value) <= 4096".to_string()
+    } else {
+        let quoted = preserve_keys
+            .iter()
+            .map(|k| sql_string_literal(k))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!("e.value IS NULL OR length(e.value) <= 4096 OR e.key IN ({quoted})")
+    };
+    format!(
+        "CASE \
+            WHEN {column} IS NULL THEN NULL \
+            WHEN TRY_CAST({column} AS MAP(VARCHAR, VARCHAR)) IS NOT NULL \
+                THEN CAST(MAP_FROM_ENTRIES(list_filter(map_entries(TRY_CAST({column} AS MAP(VARCHAR, VARCHAR))), e -> {keep_predicate})) AS JSON) \
+            ELSE CAST({column} AS JSON) \
+        END"
+    )
 }
 
 fn selector_uses_instrumentation(selector: &TraceSelector) -> bool {

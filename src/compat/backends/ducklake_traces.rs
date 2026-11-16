@@ -479,6 +479,12 @@ impl TraceQueryBackend for DuckLakeTraceBackend {
             if start == end {
                 return Ok(Vec::new());
             }
+            if start > end {
+                return Err(CompatError::new(
+                    CompatErrorCode::BadRequest,
+                    "`start` must be < `end`",
+                ));
+            }
         }
         if let Some(tags) =
             try_read_tag_index(self.tag_index.as_ref(), bounds, ctx.limits.max_series).await
@@ -514,6 +520,12 @@ impl TraceQueryBackend for DuckLakeTraceBackend {
         if let (Some(start), Some(end)) = (bounds.start_ns, bounds.end_ns) {
             if start == end {
                 return Ok(Vec::new());
+            }
+            if start > end {
+                return Err(CompatError::new(
+                    CompatErrorCode::BadRequest,
+                    "`start` must be < `end`",
+                ));
             }
         }
         let trusted = tag_values_sql(tag, bounds.start_ns, bounds.end_ns, ctx.limits.max_series)
@@ -1861,6 +1873,49 @@ mod tests {
             try_read_tag_index(Some(&reader), TraceLookupBounds::default(), 100).await,
             Some(vec!["http.method".to_string()])
         );
+        assert!(
+            !should_scan_event_link_tags(Some(&reader), "http.method").await,
+            "span-only tag must skip event/link DuckLake scan"
+        );
+        assert!(
+            should_scan_event_link_tags(Some(&reader), "unindexed.tag").await,
+            "unindexed tag must fall back to event/link scan"
+        );
+        writer
+            .upsert_entries(&[crate::tag_index::TagEntry {
+                tag: "http.method".into(),
+                last_seen_ns: 43,
+                source_mask: crate::tag_index::TAG_SOURCE_EVENT_OR_LINK,
+            }])
+            .await
+            .unwrap();
+        assert!(
+            should_scan_event_link_tags(Some(&reader), "http.method").await,
+            "tag with event/link bit must scan event/link tags"
+        );
+    }
+
+    #[tokio::test]
+    async fn should_scan_event_link_tags_defaults_to_true_when_absent_or_unreachable() {
+        assert!(should_scan_event_link_tags(None, "http.method").await);
+        let mut pg = tokio_postgres::Config::new();
+        pg.host("127.0.0.1");
+        pg.port(1);
+        pg.dbname("x");
+        pg.user("x");
+        let mgr = deadpool_postgres::Manager::from_config(
+            pg,
+            tokio_postgres::NoTls,
+            deadpool_postgres::ManagerConfig {
+                recycling_method: deadpool_postgres::RecyclingMethod::Fast,
+            },
+        );
+        let pool = deadpool_postgres::Pool::builder(mgr)
+            .max_size(1)
+            .build()
+            .unwrap();
+        let reader = crate::tag_index::TagIndexReader::new(pool, "s", "ws");
+        assert!(should_scan_event_link_tags(Some(&reader), "http.method").await);
     }
 
     #[test]

@@ -36,7 +36,7 @@ pub struct TagEntry {
 pub struct TagFlushThrottle {
     window: Duration,
     max_entries: usize,
-    last_flushed: Mutex<HashMap<String, (Instant, i16)>>,
+    last_flushed: Mutex<HashMap<String, (Instant, i16, i64)>>,
 }
 
 impl Default for TagFlushThrottle {
@@ -58,23 +58,29 @@ impl TagFlushThrottle {
         let mut guard = self.last_flushed.lock().expect("tag flush throttle lock");
         let mut due = Vec::new();
         for mut entry in entries {
-            let (is_due, merged_mask) = match guard.get(&entry.tag) {
-                Some(&(prev_at, prev_mask)) => {
+            let (is_due, merged_mask, merged_ts) = match guard.get(&entry.tag) {
+                Some(&(prev_at, prev_mask, prev_ts)) => {
                     let window_elapsed = now.saturating_duration_since(prev_at) >= self.window;
                     let new_source_bit = (entry.source_mask & !prev_mask) != 0;
-                    (window_elapsed || new_source_bit, prev_mask | entry.source_mask)
+                    let newer_event_time =
+                        entry.last_seen_ns > prev_ts.saturating_add(TAG_FLUSH_WINDOW_NS);
+                    (
+                        window_elapsed || new_source_bit || newer_event_time,
+                        prev_mask | entry.source_mask,
+                        prev_ts.max(entry.last_seen_ns),
+                    )
                 }
-                None => (true, entry.source_mask),
+                None => (true, entry.source_mask, entry.last_seen_ns),
             };
             if !is_due {
                 continue;
             }
             if !guard.contains_key(&entry.tag) && guard.len() >= self.max_entries {
-                guard.retain(|_, (ts, _)| now.saturating_duration_since(*ts) < self.window);
+                guard.retain(|_, (ts, _, _)| now.saturating_duration_since(*ts) < self.window);
                 if guard.len() >= self.max_entries {
                     if let Some(oldest) = guard
                         .iter()
-                        .min_by_key(|(_, (ts, _))| *ts)
+                        .min_by_key(|(_, (ts, _, _))| *ts)
                         .map(|(k, _)| k.clone())
                     {
                         guard.remove(&oldest);
@@ -82,7 +88,7 @@ impl TagFlushThrottle {
                 }
             }
             entry.source_mask = merged_mask;
-            guard.insert(entry.tag.clone(), (now, merged_mask));
+            guard.insert(entry.tag.clone(), (now, merged_mask, merged_ts));
             due.push(entry);
         }
         due

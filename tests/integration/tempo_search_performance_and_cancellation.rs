@@ -764,7 +764,6 @@ async fn assert_tempo_deadline_and_http_burst_cancellation(mode: WorkspaceScopeM
         assert_eq!(ok_body["traces"].as_array().unwrap().len(), 1);
     }
 
-    // Unfiltered summary search must omit oversized 64 KB attribute bodies while full trace lookup preserves them.
     let (sum_status, sum_body) = get_json(
         &router,
         &read_tok,
@@ -790,6 +789,20 @@ async fn assert_tempo_deadline_and_http_burst_cancellation(mode: WorkspaceScopeM
     assert!(
         !has_heavy_in_summary,
         "summary /api/search must omit oversized http.request.body.content: {sum_body}"
+    );
+
+    let (heavy_tag_status, heavy_tag_body) = get_json(
+        &router,
+        &read_tok,
+        &format!(
+            "/api/search?tags=http.request.body.content%3Dabcdefghij&start={start_sec}&end={end_sec}&limit=5"
+        ),
+    )
+    .await;
+    assert_eq!(heavy_tag_status, StatusCode::OK, "heavy_tag_body={heavy_tag_body}");
+    assert!(
+        !heavy_tag_body["traces"].as_array().unwrap().is_empty(),
+        "filtered /api/search?tags=... must preserve referenced >4KB keys so matching traces are not dropped"
     );
 
     let mut bulk_trace_bytes = [0u8; 16];
