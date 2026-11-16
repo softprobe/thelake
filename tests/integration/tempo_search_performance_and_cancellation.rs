@@ -799,7 +799,11 @@ async fn assert_tempo_deadline_and_http_burst_cancellation(mode: WorkspaceScopeM
         ),
     )
     .await;
-    assert_eq!(heavy_tag_status, StatusCode::OK, "heavy_tag_body={heavy_tag_body}");
+    assert_eq!(
+        heavy_tag_status,
+        StatusCode::OK,
+        "heavy_tag_body={heavy_tag_body}"
+    );
     assert!(
         !heavy_tag_body["traces"].as_array().unwrap().is_empty(),
         "filtered /api/search?tags=... must preserve referenced >4KB keys so matching traces are not dropped"
@@ -816,7 +820,8 @@ async fn assert_tempo_deadline_and_http_burst_cancellation(mode: WorkspaceScopeM
     )
     .await;
     assert_eq!(full_status, StatusCode::OK);
-    let full_has_heavy = full_body["trace"]["resourceSpans"][0]["scopeSpans"][0]["spans"][0]["attributes"]
+    let full_has_heavy = full_body["trace"]["resourceSpans"][0]["scopeSpans"][0]["spans"][0]
+        ["attributes"]
         .as_array()
         .unwrap()
         .iter()

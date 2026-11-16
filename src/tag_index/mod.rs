@@ -233,7 +233,10 @@ impl TagIndexReader {
             .context("prepare tag_index list_since")?;
         let limit_i64 = i64::try_from(limit).unwrap_or(i64::MAX);
         let rows = client
-            .query(&statement, &[&self.workspace_id, &min_last_seen_ns, &limit_i64])
+            .query(
+                &statement,
+                &[&self.workspace_id, &min_last_seen_ns, &limit_i64],
+            )
             .await
             .context("query tag_index list_since")?;
         let Some(first) = rows.first() else {
@@ -651,7 +654,11 @@ mod tests {
         s.events.push(SpanEvent {
             name: "evt".into(),
             timestamp: Utc.timestamp_opt(10, 0).unwrap(),
-            attributes: [("evt.only".into(), "1".into()), ("shared.attr".into(), "2".into())].into(),
+            attributes: [
+                ("evt.only".into(), "1".into()),
+                ("shared.attr".into(), "2".into()),
+            ]
+            .into(),
         });
         s.attributes.insert(
             LINKS_ATTRIBUTE.into(),
@@ -663,13 +670,28 @@ mod tests {
             .map(|e| (e.tag, (e.last_seen_ns, e.source_mask)))
             .collect();
         let expected_ts = 10_000_000_000;
-        assert_eq!(entries.get("span.only"), Some(&(expected_ts, TAG_SOURCE_SPAN_OR_RESOURCE)));
-        assert_eq!(entries.get("res.only"), Some(&(expected_ts, TAG_SOURCE_SPAN_OR_RESOURCE)));
-        assert_eq!(entries.get("evt.only"), Some(&(expected_ts, TAG_SOURCE_EVENT_OR_LINK)));
-        assert_eq!(entries.get("link.only"), Some(&(expected_ts, TAG_SOURCE_EVENT_OR_LINK)));
+        assert_eq!(
+            entries.get("span.only"),
+            Some(&(expected_ts, TAG_SOURCE_SPAN_OR_RESOURCE))
+        );
+        assert_eq!(
+            entries.get("res.only"),
+            Some(&(expected_ts, TAG_SOURCE_SPAN_OR_RESOURCE))
+        );
+        assert_eq!(
+            entries.get("evt.only"),
+            Some(&(expected_ts, TAG_SOURCE_EVENT_OR_LINK))
+        );
+        assert_eq!(
+            entries.get("link.only"),
+            Some(&(expected_ts, TAG_SOURCE_EVENT_OR_LINK))
+        );
         assert_eq!(
             entries.get("shared.attr"),
-            Some(&(expected_ts, TAG_SOURCE_SPAN_OR_RESOURCE | TAG_SOURCE_EVENT_OR_LINK))
+            Some(&(
+                expected_ts,
+                TAG_SOURCE_SPAN_OR_RESOURCE | TAG_SOURCE_EVENT_OR_LINK
+            ))
         );
     }
 

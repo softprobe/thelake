@@ -309,11 +309,9 @@ fn trailing_tag_index_min_last_seen_ns(bounds: TraceLookupBounds, now_ns: i64) -
             return None;
         }
     }
-    Some(
-        bounds
-            .start_ns
-            .map_or(i64::MIN, |start| start.saturating_sub(crate::tag_index::TAG_FLUSH_WINDOW_NS)),
-    )
+    Some(bounds.start_ns.map_or(i64::MIN, |start| {
+        start.saturating_sub(crate::tag_index::TAG_FLUSH_WINDOW_NS)
+    }))
 }
 
 async fn try_read_tag_index(

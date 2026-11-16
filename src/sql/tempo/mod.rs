@@ -242,8 +242,8 @@ fn compile_trace_scan_sql(
     };
     let has_row_filter =
         !params.tags.is_empty() || !matches!(params.selector, None | Some(TraceSelector::All));
-    let can_use_summary_projection = trace_id.is_none()
-        && !params.selector.is_some_and(selector_uses_instrumentation);
+    let can_use_summary_projection =
+        trace_id.is_none() && !params.selector.is_some_and(selector_uses_instrumentation);
     let template = if is_plain_trace_lookup {
         TRACE_LOOKUP_SCAN_SQL
     } else if !has_row_filter && can_use_summary_projection {
@@ -265,8 +265,7 @@ fn compile_trace_scan_sql(
         collect_selector_keys(selector, &mut preserve_keys);
     }
     let trimmed_attributes = trimmed_map_json_expr("attributes", &preserve_keys);
-    let trimmed_resource_attributes =
-        trimmed_map_json_expr("resource_attributes", &preserve_keys);
+    let trimmed_resource_attributes = trimmed_map_json_expr("resource_attributes", &preserve_keys);
 
     Ok(window
         .scan_with_timestamp_filter("", |bound| {
@@ -284,15 +283,15 @@ fn compile_trace_scan_sql(
                 .replace("{{trace_limit}}", &trace_limit.to_string())
                 .replace("{{cap}}", &cap.to_string())
                 .replace("{{trimmed_attributes}}", &trimmed_attributes)
-                .replace("{{trimmed_resource_attributes}}", &trimmed_resource_attributes)
+                .replace(
+                    "{{trimmed_resource_attributes}}",
+                    &trimmed_resource_attributes,
+                )
         })
         .into_sql())
 }
 
-fn collect_selector_keys(
-    selector: &TraceSelector,
-    keys: &mut std::collections::BTreeSet<String>,
-) {
+fn collect_selector_keys(selector: &TraceSelector, keys: &mut std::collections::BTreeSet<String>) {
     match selector {
         TraceSelector::All => {}
         TraceSelector::And(left, right) | TraceSelector::Or(left, right) => {
@@ -1160,11 +1159,13 @@ mod tests {
             (String::from("service.name"), String::from("checkout-api")),
             (String::from("http.request.method"), String::from("POST")),
         ]);
-        let tags_sql = trace_scan_sql(windowed(&tags, None, None, None, 10), None)
-            .expect("tags summary sql");
+        let tags_sql =
+            trace_scan_sql(windowed(&tags, None, None, None, 10), None).expect("tags summary sql");
         assert!(tags_sql.as_str().contains("length(e.value) <= 4096"));
         assert!(!tags_sql.as_str().contains("CAST(links AS JSON)"));
-        assert!(!tags_sql.as_str().contains("CAST(instrumentation_scope AS JSON)"));
+        assert!(!tags_sql
+            .as_str()
+            .contains("CAST(instrumentation_scope AS JSON)"));
 
         let lookup_sql = trace_scan_sql(
             windowed(&empty, None, None, None, 10),
