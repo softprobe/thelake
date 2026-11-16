@@ -17,7 +17,10 @@ mod util;
 pub(crate) mod workspace_views;
 mod writer;
 
-pub(crate) use catalog_pool::{CatalogPool, DevReset, QueryCaller, QuerySession, QuerySlot};
+pub(crate) use catalog_pool::{
+    CatalogPool, DevReset, QueryCaller, QueryCancelToken, QuerySession, QuerySlot,
+    QUERY_CANCELLED_MESSAGE,
+};
 pub(crate) use physical_scope::{
     DuckLakeAccess, PhysicalScope, SharedScopeError, SharedScopeErrorCode, WorkspaceBinding,
     WorkspaceScopeMode,

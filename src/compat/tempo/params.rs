@@ -42,9 +42,22 @@ pub fn parse_tempo_trace_lookup_params(
     Ok(TempoTraceLookupParams { start_ns, end_ns })
 }
 
-pub fn parse_tempo_tag_params(pairs: &[(String, String)]) -> Result<(), CompatError> {
-    for (key, _) in pairs {
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct TempoTagParams {
+    pub start_ns: Option<i64>,
+    pub end_ns: Option<i64>,
+}
+
+pub fn parse_tempo_tag_params(
+    pairs: &[(String, String)],
+    limits: &QueryLimits,
+) -> Result<TempoTagParams, CompatError> {
+    let mut start_ns = None;
+    let mut end_ns = None;
+    for (key, value) in pairs {
         match key.as_str() {
+            "start" => start_ns = Some(parse_tempo_time_ns(value)?),
+            "end" => end_ns = Some(parse_tempo_time_ns(value)?),
             "workspace_id" => {}
             _ => {
                 return Err(unsupported(format!(
@@ -53,7 +66,8 @@ pub fn parse_tempo_tag_params(pairs: &[(String, String)]) -> Result<(), CompatEr
             }
         }
     }
-    Ok(())
+    validate_bounds(start_ns, end_ns, limits)?;
+    Ok(TempoTagParams { start_ns, end_ns })
 }
 
 pub fn parse_tempo_search_params(
@@ -316,8 +330,11 @@ mod tests {
             &QueryLimits::default(),
         )
         .expect("workspace_id is discarded and does not bind scope");
-        parse_tempo_tag_params(&[("workspace_id".into(), "spoofed".into())])
-            .expect("workspace_id is discarded and does not bind scope");
+        parse_tempo_tag_params(
+            &[("workspace_id".into(), "spoofed".into())],
+            &QueryLimits::default(),
+        )
+        .expect("workspace_id is discarded and does not bind scope");
         parse_tempo_search_params(
             &[("workspace_id".into(), "spoofed".into())],
             &QueryLimits::default(),
@@ -337,7 +354,60 @@ mod tests {
 
     #[test]
     fn rejects_unknown_tag_query_parameters() {
-        let err = parse_tempo_tag_params(&[("mode".into(), "ignored".into())]).unwrap_err();
+        let err = parse_tempo_tag_params(
+            &[("mode".into(), "ignored".into())],
+            &QueryLimits::default(),
+        )
+        .unwrap_err();
         assert_eq!(err.code, CompatErrorCode::UnsupportedFeature);
+    }
+
+    #[test]
+    fn parses_optional_tag_window_bounds_and_enforces_range_limits() {
+        let omitted = parse_tempo_tag_params(&[], &QueryLimits::default()).expect("omitted bounds");
+        assert_eq!(omitted.start_ns, None);
+        assert_eq!(omitted.end_ns, None);
+
+        let bounded = parse_tempo_tag_params(
+            &[
+                ("start".into(), "1700000000".into()),
+                ("end".into(), "1700000600".into()),
+            ],
+            &QueryLimits::default(),
+        )
+        .expect("bounded");
+        assert_eq!(bounded.start_ns, Some(1_700_000_000_000_000_000));
+        assert_eq!(bounded.end_ns, Some(1_700_000_600_000_000_000));
+
+        let inverted = parse_tempo_tag_params(
+            &[("start".into(), "20".into()), ("end".into(), "10".into())],
+            &QueryLimits::default(),
+        )
+        .unwrap_err();
+        assert_eq!(inverted.code, CompatErrorCode::BadRequest);
+
+        let tight_limits = QueryLimits {
+            max_query_range_seconds: 60,
+            ..QueryLimits::default()
+        };
+        let too_wide = parse_tempo_tag_params(
+            &[
+                ("start".into(), "1000".into()),
+                ("end".into(), "1200".into()),
+            ],
+            &tight_limits,
+        )
+        .unwrap_err();
+        assert_eq!(too_wide.code, CompatErrorCode::LimitExceeded);
+
+        let tag_filter_unsupported = parse_tempo_tag_params(
+            &[("q".into(), "{ status = error }".into())],
+            &QueryLimits::default(),
+        )
+        .unwrap_err();
+        assert_eq!(
+            tag_filter_unsupported.code,
+            CompatErrorCode::UnsupportedFeature
+        );
     }
 }

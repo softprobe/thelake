@@ -51,6 +51,13 @@ impl DuckLakeLogsBackend {
                         rows: Vec::new(),
                         row_count: 0,
                     })
+                } else if message.starts_with("Interrupt Error")
+                    || message.contains("DuckDB query cancelled")
+                {
+                    Err(CompatError::new(
+                        CompatErrorCode::LimitExceeded,
+                        "query deadline exceeded",
+                    ))
                 } else {
                     Err(CompatError::new(
                         CompatErrorCode::BadRequest,

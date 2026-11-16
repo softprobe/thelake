@@ -1260,7 +1260,62 @@ mod tests {
             .unwrap()
             .timestamp_nanos_opt()
             .unwrap();
-        let sql = crate::sql::tempo::trace_scan_sql(
+        let search_sql = crate::sql::tempo::trace_scan_sql(
+            crate::sql::tempo::TraceScanParams {
+                tags: &tags,
+                selector: None,
+                min_duration_ns: None,
+                max_duration_ns: None,
+                start_ns: Some(start),
+                end_ns: Some(end),
+                limit: 100,
+            },
+            None,
+        )
+        .unwrap();
+        let search_sql = search_sql.as_str();
+
+        assert!(has_timestamp_bound_for_each_fact_source(search_sql));
+        let mut statement = conn
+            .prepare(&format!("EXPLAIN (FORMAT JSON) {search_sql}"))
+            .unwrap();
+        let rows = statement
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap();
+        let plan: serde_json::Value =
+            serde_json::from_str(&rows.collect::<Result<Vec<_>, _>>().unwrap().join("\n")).unwrap();
+        let mut fact_scans = Vec::new();
+        collect_fact_scans(&plan, &mut fact_scans);
+        assert!(
+            fact_scans.len() > 1,
+            "expected CTE inlining for Tempo search: {fact_scans:?}"
+        );
+        assert!(fact_scans.iter().all(|(_, filters)| !filters
+            .as_deref()
+            .map(filter_guarantees_timestamp_pruning)
+            .unwrap_or(false)));
+        ensure_fact_scan_uses_timestamp_pruning(&conn, search_sql).unwrap();
+
+        let selector = crate::compat::tempo::traceql::parse_traceql("{ status = error }").unwrap();
+        let filtered_sql = crate::sql::tempo::trace_scan_sql(
+            crate::sql::tempo::TraceScanParams {
+                tags: &tags,
+                selector: Some(&selector),
+                min_duration_ns: Some(100_000_000),
+                max_duration_ns: None,
+                start_ns: Some(start),
+                end_ns: Some(end),
+                limit: 100,
+            },
+            None,
+        )
+        .unwrap();
+        assert!(has_timestamp_bound_for_each_fact_source(
+            filtered_sql.as_str()
+        ));
+        ensure_fact_scan_uses_timestamp_pruning(&conn, filtered_sql.as_str()).unwrap();
+
+        let lookup_sql = crate::sql::tempo::trace_scan_sql(
             crate::sql::tempo::TraceScanParams {
                 tags: &tags,
                 selector: None,
@@ -1273,29 +1328,48 @@ mod tests {
             Some("trace-id"),
         )
         .unwrap();
-        let sql = sql.as_str();
-
-        assert!(has_timestamp_bound_for_each_fact_source(sql));
-        let mut statement = conn
-            .prepare(&format!("EXPLAIN (FORMAT JSON) {sql}"))
+        assert!(has_timestamp_bound_for_each_fact_source(
+            lookup_sql.as_str()
+        ));
+        let mut lookup_stmt = conn
+            .prepare(&format!("EXPLAIN (FORMAT JSON) {}", lookup_sql.as_str()))
             .unwrap();
-        let rows = statement
+        let lookup_rows = lookup_stmt
             .query_map([], |row| row.get::<_, String>(1))
             .unwrap();
-        let plan: serde_json::Value =
-            serde_json::from_str(&rows.collect::<Result<Vec<_>, _>>().unwrap().join("\n")).unwrap();
-        let mut fact_scans = Vec::new();
-        collect_fact_scans(&plan, &mut fact_scans);
-        assert!(!fact_scans.is_empty());
-        assert!(fact_scans.iter().all(|(_, filters)| !filters
-            .as_deref()
-            .map(filter_guarantees_timestamp_pruning)
-            .unwrap_or(false)));
-        assert!(
-            fact_scans.len() > 1,
-            "expected CTE inlining: {fact_scans:?}"
+        let lookup_plan: serde_json::Value = serde_json::from_str(
+            &lookup_rows
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+                .join("\n"),
+        )
+        .unwrap();
+        let mut lookup_scans = Vec::new();
+        collect_fact_scans(&lookup_plan, &mut lookup_scans);
+        assert_eq!(
+            lookup_scans.len(),
+            1,
+            "single-trace lookup should scan traces once: {lookup_scans:?}"
         );
-        ensure_fact_scan_uses_timestamp_pruning(&conn, sql).unwrap();
+        ensure_fact_scan_uses_timestamp_pruning(&conn, lookup_sql.as_str()).unwrap();
+
+        let tag_names_sql =
+            crate::sql::tempo::tag_names_map_keys_sql(Some(start), Some(end), 1000).unwrap();
+        let tag_events_sql =
+            crate::sql::tempo::tag_event_link_rows_sql(Some(start), Some(end), 1000).unwrap();
+        let tag_vals_sql =
+            crate::sql::tempo::tag_values_sql("http.request.method", Some(start), Some(end), 1000)
+                .unwrap();
+        for tag_sql in [
+            tag_names_sql.as_str(),
+            tag_events_sql.as_str(),
+            tag_vals_sql.as_str(),
+        ] {
+            assert!(
+                has_timestamp_bound_for_each_fact_source(tag_sql),
+                "tag SQL must have isolated fact-source timestamp bounds: {tag_sql}"
+            );
+        }
     }
 
     #[test]

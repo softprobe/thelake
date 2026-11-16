@@ -23,6 +23,7 @@ pub mod promotion_telemetry_ingest;
 pub mod qualification_contract;
 pub mod session_trace_parquet_layout;
 pub mod stateless_agent_trace_ingest;
+pub mod tempo_search_performance_and_cancellation;
 #[cfg(feature = "integration-e2e")]
 pub mod workspace_ducklake_registry;
 #[cfg(feature = "integration-e2e")]
