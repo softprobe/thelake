@@ -243,7 +243,6 @@ fn compile_trace_scan_sql(
     let has_row_filter =
         !params.tags.is_empty() || !matches!(params.selector, None | Some(TraceSelector::All));
     let can_use_summary_projection = trace_id.is_none()
-        && params.tags.is_empty()
         && !params.selector.is_some_and(selector_uses_instrumentation);
     let template = if is_plain_trace_lookup {
         TRACE_LOOKUP_SCAN_SQL
@@ -997,8 +996,8 @@ mod tests {
 
         let tags = BTreeMap::from([(String::from("exception.type"), String::from("Timeout"))]);
         let tag_sql = trace_scan_sql(windowed(&tags, None, None, None, 10), None).expect("sql");
-        assert!(tag_sql.as_str().contains("events"));
-        assert!(tag_sql.as_str().contains("CAST(links AS JSON)"));
+        assert!(!tag_sql.as_str().contains("events"));
+        assert!(!tag_sql.as_str().contains("CAST(links AS JSON)"));
 
         let lookup_sql = trace_scan_sql(
             windowed(&empty, None, None, None, 10),
@@ -1095,5 +1094,30 @@ mod tests {
             .next()
             .expect("filter_base section");
         assert!(inst_head.contains("instrumentation_scope"));
+    }
+
+    #[test]
+    fn summary_scan_caps_oversized_attribute_values_and_allows_tags_query() {
+        let empty = BTreeMap::new();
+        let unfiltered = trace_scan_sql(windowed(&empty, None, None, None, 10), None)
+            .expect("unfiltered summary sql");
+        assert!(unfiltered.as_str().contains("length(e.value) <= 4096"));
+
+        let tags = BTreeMap::from([
+            (String::from("service.name"), String::from("checkout-api")),
+            (String::from("http.request.method"), String::from("POST")),
+        ]);
+        let tags_sql = trace_scan_sql(windowed(&tags, None, None, None, 10), None)
+            .expect("tags summary sql");
+        assert!(tags_sql.as_str().contains("length(e.value) <= 4096"));
+        assert!(!tags_sql.as_str().contains("CAST(links AS JSON)"));
+        assert!(!tags_sql.as_str().contains("CAST(instrumentation_scope AS JSON)"));
+
+        let lookup_sql = trace_scan_sql(
+            windowed(&empty, None, None, None, 10),
+            Some("0123456789abcdef0123456789abcdef"),
+        )
+        .expect("lookup sql");
+        assert!(!lookup_sql.as_str().contains("length(e.value) <= 4096"));
     }
 }

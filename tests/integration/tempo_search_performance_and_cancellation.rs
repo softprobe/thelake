@@ -764,6 +764,60 @@ async fn assert_tempo_deadline_and_http_burst_cancellation(mode: WorkspaceScopeM
         assert_eq!(ok_body["traces"].as_array().unwrap().len(), 1);
     }
 
+    // Unfiltered summary search must omit oversized 64 KB attribute bodies while full trace lookup preserves them.
+    let (sum_status, sum_body) = get_json(
+        &router,
+        &read_tok,
+        &format!("/api/search?start={start_sec}&end={end_sec}&limit=5"),
+    )
+    .await;
+    assert_eq!(sum_status, StatusCode::OK, "sum_body={sum_body}");
+    let sum_traces = sum_body["traces"].as_array().unwrap();
+    assert!(!sum_traces.is_empty());
+    let has_heavy_in_summary = sum_traces.iter().any(|trace| {
+        trace["spanSet"]["spans"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|sp| {
+                sp["attributes"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .any(|attr| attr["key"] == "http.request.body.content")
+            })
+    });
+    assert!(
+        !has_heavy_in_summary,
+        "summary /api/search must omit oversized http.request.body.content: {sum_body}"
+    );
+
+    let mut bulk_trace_bytes = [0u8; 16];
+    bulk_trace_bytes[0..8].copy_from_slice(&1u64.to_be_bytes());
+    bulk_trace_bytes[8..16].copy_from_slice(&1000u64.to_be_bytes());
+    let bulk_trace_hex = hex::encode(bulk_trace_bytes);
+    let (full_status, full_body) = get_json(
+        &router,
+        &read_tok,
+        &format!("/api/v2/traces/{bulk_trace_hex}"),
+    )
+    .await;
+    assert_eq!(full_status, StatusCode::OK);
+    let full_has_heavy = full_body["trace"]["resourceSpans"][0]["scopeSpans"][0]["spans"][0]["attributes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|attr| {
+            attr["key"] == "http.request.body.content"
+                && attr["value"]["stringValue"]
+                    .as_str()
+                    .is_some_and(|v| v.len() == heavy_payload.len())
+        });
+    assert!(
+        full_has_heavy,
+        "full trace lookup must preserve the full 64 KB attribute body"
+    );
+
     let heal_after = self_heal_snapshot();
     assert_eq!(
         heal_after.rebuilds, heal_before.rebuilds,
