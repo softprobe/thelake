@@ -446,7 +446,9 @@ impl TraceQueryBackend for DuckLakeTraceBackend {
             }
         }
         if bounds.start_ns.is_none() && bounds.end_ns.is_none() {
-            if let Some(tags) = try_read_tag_index(self.tag_index.as_ref(), ctx.limits.max_series).await {
+            if let Some(tags) =
+                try_read_tag_index(self.tag_index.as_ref(), ctx.limits.max_series).await
+            {
                 return Ok(tags);
             }
         }
