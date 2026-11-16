@@ -12,6 +12,7 @@ pub mod logs;
 pub mod maintenance;
 pub(crate) mod paging;
 pub mod promotion;
+pub(crate) mod promotion_stats;
 pub mod schema;
 pub mod session_summary;
 pub mod telemetry;

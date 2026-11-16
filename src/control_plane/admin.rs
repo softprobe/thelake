@@ -22,6 +22,12 @@ impl AdminEngine {
         Self { writer, resolver }
     }
 
+    pub async fn load_active_telemetry_promotions(&self) -> Result<Vec<TelemetryColumnsManifest>> {
+        self.resolver
+            .load_active_telemetry_columns_manifests_for_scope(self.writer.metadata_schema())
+            .await
+    }
+
     pub async fn apply_and_record_telemetry_promotion(
         &self,
         manifest_yaml: &str,

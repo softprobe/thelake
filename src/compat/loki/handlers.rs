@@ -147,6 +147,11 @@ async fn run_query(
     request.end_ns = end_ns;
     request.limit = params.limit;
     request.direction = params.direction;
+    state.workspaces.promotion_usage().record_logql_matchers(
+        &ctx.auth.workspace_id,
+        &request.matchers,
+        &request.parsed_filters,
+    );
     let backend = match backend_for(state, &ctx).await {
         Ok(backend) => backend,
         Err(err) => return error_response(PROTOCOL, err),

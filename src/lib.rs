@@ -14,6 +14,7 @@ pub mod grpc_otlp;
 pub mod ingest;
 pub mod models;
 pub mod promotion;
+pub mod promotion_recommendations;
 pub mod query;
 pub mod self_monitoring;
 pub mod session_summary;

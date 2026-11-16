@@ -147,6 +147,11 @@ async fn search_handler(
         Ok(backend) => backend,
         Err(err) => return error_response(PROTOCOL, err),
     };
+    state.workspaces.promotion_usage().record_tempo_search(
+        &ctx.auth.workspace_id,
+        &request.tags,
+        request.selector.as_ref(),
+    );
     match backend.search(&ctx, request).await {
         Ok(hits) => search_response(&hits, ctx.limits.max_response_bytes)
             .unwrap_or_else(|err| error_response(PROTOCOL, err)),

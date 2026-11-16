@@ -309,6 +309,12 @@ pub async fn search_traces(
     tenant: Option<Extension<WorkspaceAuth>>,
     Json(request): Json<crate::sql::telemetry::TelemetrySearchRequest>,
 ) -> Result<Json<Value>, ApiError> {
+    if let Some(auth) = tenant.as_ref() {
+        state
+            .workspaces
+            .promotion_usage()
+            .record_telemetry_search(&auth.0.workspace_id, &request);
+    }
     let res = crate::api::mapping::execute_dynamic_search(
         &state,
         tenant.as_ref().map(|e| &e.0),
