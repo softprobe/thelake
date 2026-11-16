@@ -8,6 +8,7 @@
 mod attach;
 mod catalog_pool;
 pub(crate) mod layout;
+pub mod migrate_variant;
 mod object_store;
 mod otlp;
 pub(crate) mod physical_scope;

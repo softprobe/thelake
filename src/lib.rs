@@ -12,7 +12,7 @@ pub mod config;
 pub mod control_plane;
 pub mod grpc_otlp;
 pub mod ingest;
-pub mod migrate_variant;
+pub use storage::ducklake::migrate_variant;
 pub mod models;
 pub mod promotion;
 pub mod promotion_recommendations;
