@@ -353,10 +353,19 @@ fn describe_duckdb_table(
     conn: &Connection,
     qualified: &str,
 ) -> Result<Option<Vec<(String, String)>>> {
-    let mut stmt = match conn.prepare(&format!("DESCRIBE {qualified}")) {
-        Ok(stmt) => stmt,
-        Err(_) => return Ok(None),
-    };
+    if let Some((db, table)) = qualified.split_once('.') {
+        let exists: i64 = conn.query_row(
+            sql_templates::ducklake_table_exists_sql(),
+            [db, table],
+            |r| r.get(0),
+        )?;
+        if exists == 0 {
+            return Ok(None);
+        }
+    }
+    let mut stmt = conn
+        .prepare(&format!("DESCRIBE {qualified}"))
+        .with_context(|| format!("describe {qualified}"))?;
     let mut rows = stmt.query([])?;
     let mut cols = Vec::new();
     while let Some(row) = rows.next()? {
