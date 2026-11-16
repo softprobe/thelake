@@ -16,9 +16,9 @@ fail() {
 [[ ! -e "$repo_root/scripts/patches/ducklake-newer-than-v1.5.5.patch" ]] || fail "source patch remains"
 [[ -f "$repo_root/scripts/ducklake-extension.lock" ]] || fail "pinned public release lock is missing"
 awk '
-  $1 == "repository" && $2 == "softprobe/ducklake" { repository = 1 }
-  $1 == "release" && $2 ~ /^duckdb-v1[.]5[.]6-[[:xdigit:]]+$/ { release = 1 }
-  $1 == "duckdb_version" && $2 == "1.5.6" { version = 1 }
+  $1 == "repository" && $2 == "extensions.duckdb.org" { repository = 1 }
+  $1 == "release" && $2 == "v2.0.0" { release = 1 }
+  $1 == "duckdb_version" && $2 == "2.0.0" { version = 1 }
   ($1 == "linux_amd64" || $1 == "osx_arm64") && length($2) == 64 && $2 !~ /[^[:xdigit:]]/ && length($3) == 64 && $3 !~ /[^[:xdigit:]]/ { platforms++ }
   END { exit !(repository && release && version && platforms == 2) }
 ' "$repo_root/scripts/ducklake-extension.lock" || fail "release lock does not pin both tested platforms and digests"
