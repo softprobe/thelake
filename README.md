@@ -95,6 +95,10 @@ GitHub Actions (Make-only; cache under `~/.cache/thelake` via
 - `.github/workflows/ci.yml` — on push/PR: `make doctor` → `setup` →
   `check-fmt` / `lint` / `test`, plus separate DuckLake E2E and Explorer UI
   jobs. Local pre-merge gate remains `make setup && make ci` (warm SLO ≤ 18m).
+- `.github/workflows/staging.yml` — after `CI` succeeds for a push to `main`,
+  publishes both Docker images with a `staging-<commit SHA>` tag and calls the
+  `deployment-k8s` GitOps repo to update the image pins, deploy staging, and
+  run persisted-readback E2E.
 - `.github/workflows/performance.yml` — **manual** only: `make test-perf`
   (`PERF_SUITE=all|latency|concurrency`, `PERF_TARGET_MS=1000`). Warm SLO ≤ 8m.
 - `.github/workflows/release.yml` — on GitHub Release: `make release`
@@ -212,6 +216,17 @@ Official path: GitHub Release → `.github/workflows/release.yml` → `make rele
 Images push to public Docker Hub **`softprobe/thelake:<tag>`** (and `:latest`
 for non-prerelease). Auth: Actions secret `DOCKER_HUB_PASSWORD` (username
 `softprobe`).
+
+Staging path: successful `main` CI → `.github/workflows/staging.yml` → Docker
+Hub tags `staging-<commit SHA>` for both `softprobe/thelake` and
+`softprobe/thelake-collector` → GitOps update in `deployment-k8s`, rollout,
+and staging E2E. The workflow updates the GitOps manifest with the existing
+`GH_PAT` secret. This path does not move `latest` or require a manual
+image-pin change.
+
+Merge the `deployment-k8s` GitOps helper and manifest changes before merging
+this workflow to `main`; the deploy job checks out those files from
+`deployment-k8s` `main`.
 
 PR Actions (`.github/workflows/ci.yml`, dev profile) do not build `dist/`.
 

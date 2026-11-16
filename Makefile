@@ -21,7 +21,7 @@ SHELL := /bin/bash
 .PHONY: help ensure-cache doctor setup teardown check-infra explorer-deps explorer-assets run \
 	clean clean-cache build build-release build-collector package package-collector publish publish-collector test-publish-tags \
 	contracts-test lint lint-collector check-no-subrepo-skills check-sql-guardrails fmt check-fmt \
-	test test-collector test-e2e test-perf ci release _release test-loki-diff test-tempo-diff \
+	test test-collector test-staging-e2e test-staging-e2e-contract test-e2e test-perf ci release _release test-loki-diff test-tempo-diff \
 	check-compat-reference-pins check-grafana-reference-pin \
 	compat-reference-image compat-reference-version compat-builder-image grafana-reference-version grafana-reference-image grafana-reference-digest \
 	ducklake-extension \
@@ -151,6 +151,7 @@ help:
 	@echo ""
 	@echo "Build:    build | build-release | package | publish"
 	@echo "Test:     test | test-e2e | test-perf"
+	@echo "Staging:  test-staging-e2e (writes one synthetic trace)"
 	@echo "Gates:    ci | release"
 	@echo "Infra:    setup | teardown | doctor"
 	@echo "Stress:   stress BACKEND=local|r2|gcs"
@@ -456,7 +457,13 @@ ducklake-extension:
 test-collector:
 	cd "$(COLLECTOR_DIR)" && go test -race -count=1 ./...
 
-test: ensure-cache ducklake-extension explorer-assets test-collector
+test-staging-e2e-contract:
+	python3 scripts/test_staging_e2e.py
+
+test-staging-e2e:
+	python3 scripts/staging_e2e.py
+
+test: ensure-cache ducklake-extension explorer-assets test-collector test-staging-e2e-contract
 	bash tests/scripts/ducklake_extension_download_test.sh
 	@echo "unit + lightweight tests (no e2e infra)..."
 	cargo test $(CARGO_PROFILE_FLAG) --lib --test tests --test compatibility -- --test-threads=1
