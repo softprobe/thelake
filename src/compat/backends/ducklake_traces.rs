@@ -818,9 +818,7 @@ fn parse_events(
 
 fn parse_json_object(value: &Value, row_index: usize, field: &str) -> Result<Value, CompatError> {
     let value = strict_json_value(value, row_index, field)?;
-    // MAP bags stringify nested arrays/objects; rehydrate so Tempo scope fidelity
-    // keeps `attributes: []` as a JSON array (not the string `"[]"`).
-    let value = crate::storage::schema::rehydrate_map_json_values(value);
+    let value = crate::storage::schema::parse_projected_json_value(value);
     if value.is_object() {
         Ok(value)
     } else {
@@ -1159,9 +1157,9 @@ fn unwrap_map_encoded_json_array(value: Value) -> Value {
     }
     if map.len() == 1 {
         if let Some(raw) = map.remove("_raw") {
-            let rehydrated = crate::storage::schema::rehydrate_map_json_values(raw);
-            return match rehydrated {
-                Value::Array(_) => rehydrated,
+            let parsed = crate::storage::schema::parse_projected_json_value(raw);
+            return match parsed {
+                Value::Array(_) => parsed,
                 Value::String(text) => serde_json::from_str(&text).unwrap_or(Value::String(text)),
                 other => other,
             };

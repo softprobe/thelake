@@ -8,6 +8,6 @@ CREATE TABLE IF NOT EXISTS score_configs (
     max_value DOUBLE,
     categories VARCHAR,
     author_id VARCHAR,
-    metadata MAP(VARCHAR, VARCHAR),
+    metadata VARIANT,
     workspace_id VARCHAR
 );

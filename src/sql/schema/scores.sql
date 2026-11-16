@@ -13,6 +13,6 @@ CREATE TABLE IF NOT EXISTS scores (
     comment VARCHAR,
     config_id VARCHAR,
     author_id VARCHAR,
-    metadata MAP(VARCHAR, VARCHAR),
+    metadata VARIANT,
     workspace_id VARCHAR
 );

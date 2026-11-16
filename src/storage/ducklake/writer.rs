@@ -219,7 +219,14 @@ impl DuckLakeWriter {
                         field.name()
                     )
                 })?;
-            let expected = Self::arrow_field_to_duck_add_type(field)?;
+            let expected = if crate::storage::schema::attribute_map::is_variant_column(
+                table_name,
+                field.name(),
+            ) {
+                "VARIANT"
+            } else {
+                Self::arrow_field_to_duck_add_type(field)?
+            };
             if normalize_duck_type(actual) != normalize_duck_type(expected) {
                 return Err(anyhow!(
                     "base column {} on {qualified_table} has type {actual}, expected {expected}; clean cutover is required",
@@ -246,7 +253,14 @@ impl DuckLakeWriter {
             for field in schema.fields() {
                 if let Some(actual) = found.get(&field.name().to_ascii_lowercase()) {
                     if !base_names.contains(&field.name().to_ascii_lowercase()) {
-                        let expected = Self::arrow_field_to_duck_add_type(field)?;
+                        let expected = if crate::storage::schema::attribute_map::is_variant_column(
+                            table_name,
+                            field.name(),
+                        ) {
+                            "VARIANT"
+                        } else {
+                            Self::arrow_field_to_duck_add_type(field)?
+                        };
                         if normalize_duck_type(actual) != normalize_duck_type(expected) {
                             return Err(anyhow!(
                                 "promoted column {} on {qualified_table} has type {actual}, expected {expected}",

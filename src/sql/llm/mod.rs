@@ -527,7 +527,7 @@ pub fn compile_scores_for_span_sql(
         .scan_with_timestamp_filter("", |bound| {
             format!(
                 "SELECT {cols} FROM scores WHERE span_id = {sid} AND {bound} ORDER BY timestamp DESC, score_id DESC",
-                cols = score_columns("metadata"),
+                cols = score_columns("CAST(metadata AS JSON)"),
             )
         })
         .into_sql())
@@ -547,7 +547,7 @@ pub fn compile_scores_for_trace_sql(
             );
             format!(
                 "SELECT {cols} FROM scores WHERE {identity} AND {bound} ORDER BY timestamp DESC, score_id DESC",
-                cols = score_columns("metadata"),
+                cols = score_columns("CAST(metadata AS JSON)"),
             )
         })
         .into_sql())
@@ -579,7 +579,7 @@ fn observation_projection(include_payload: bool) -> String {
         cols.push("NULLIF(TRIM(app_id), '') AS app_id".to_string());
         cols.push(attribute_map_as_json("attributes"));
         cols.push(attribute_map_as_json("resource_attributes"));
-        cols.push("events".to_string());
+        cols.push(attribute_map_as_json("events"));
     }
     cols.join(", ")
 }
@@ -819,11 +819,11 @@ mod tests {
     use chrono::{TimeZone, Utc};
 
     #[test]
-    fn payload_projection_reads_json_events_without_recasting() {
+    fn payload_projection_casts_variant_events_to_json() {
         let sql = observation_projection(true);
         assert!(
-            sql.contains("events") && !sql.contains("CAST(events AS JSON)"),
-            "events already use the JSON table type: {sql}"
+            sql.contains("CAST(events AS JSON) AS events"),
+            "VARIANT events must be cast to JSON for duckdb-rs decoding: {sql}"
         );
     }
 
@@ -879,47 +879,47 @@ mod tests {
     {
         let conn = open_duckdb_with_traces_and_scores();
         conn.execute_batch(
-            "INSERT INTO traces (
+            r#"INSERT INTO traces (
                session_id, trace_id, span_id, parent_span_id, app_id, message_type, span_kind,
                timestamp, end_timestamp, attributes, resource_attributes, events, status_code, status_message
              ) VALUES
              (
                't_hist_1', 't_hist_1', 'sp_agent', NULL, 'fallback-app', 'concierge.run', 'Internal',
                TIMESTAMP_NS '2026-07-18 12:00:00', TIMESTAMP_NS '2026-07-18 12:00:05',
-               MAP {
-                 'traceloop.span.kind': 'agent',
-                 'traceloop.entity.name': 'concierge-agent',
-                 'traceloop.association.properties.session_id': 'ses_hist_1',
-                 'traceloop.association.properties.user_id': 'usr_hist_1',
-                 'gen_ai.usage.input_tokens': '25854',
-                 'gen_ai.usage.output_tokens': '2447',
-                 'gen_ai.usage.total_tokens': '28301'
-               },
-               MAP {'service.name': 'travel-agent'},
-               '[]', 'OK', NULL
+               JSON '{
+                 "traceloop.span.kind": "agent",
+                 "traceloop.entity.name": "concierge-agent",
+                 "traceloop.association.properties.session_id": "ses_hist_1",
+                 "traceloop.association.properties.user_id": "usr_hist_1",
+                 "gen_ai.usage.input_tokens": "25854",
+                 "gen_ai.usage.output_tokens": "2447",
+                 "gen_ai.usage.total_tokens": "28301"
+               }'::VARIANT,
+               JSON '{"service.name": "travel-agent"}'::VARIANT,
+               JSON '[]'::VARIANT, 'OK', NULL
              ),
              (
                't_hist_1', 't_hist_1', 'sp_gen', 'sp_agent', 'fallback-app', 'ChatVertexAI', 'Client',
                TIMESTAMP_NS '2026-07-18 12:00:01', TIMESTAMP_NS '2026-07-18 12:00:04',
-               MAP {
-                 'openinference.span.kind': 'llm',
-                 'traceloop.association.properties.session_id': 'ses_hist_1',
-                 'llm.model_name': 'gemini-2.5-flash',
-                 'llm.system': 'vertexai',
-                 'llm.token_count.prompt': '25854',
-                 'llm.token_count.completion': '2447',
-                 'llm.token_count.total': '28301'
-               },
-               MAP {},
-               '[]', 'ERROR', 'upstream rate limit'
+               JSON '{
+                 "openinference.span.kind": "llm",
+                 "traceloop.association.properties.session_id": "ses_hist_1",
+                 "llm.model_name": "gemini-2.5-flash",
+                 "llm.system": "vertexai",
+                 "llm.token_count.prompt": "25854",
+                 "llm.token_count.completion": "2447",
+                 "llm.token_count.total": "28301"
+               }'::VARIANT,
+               JSON '{}'::VARIANT,
+               JSON '[]'::VARIANT, 'ERROR', 'upstream rate limit'
              ),
              (
                't_hist_1', 't_hist_1', 'sp_body', 'sp_agent', 'fallback-app', 'softprobe.http.body.capture', 'Unspecified',
                TIMESTAMP_NS '2026-07-18 12:00:02', TIMESTAMP_NS '2026-07-18 12:00:02',
-               MAP {'traceloop.association.properties.session_id': 'ses_hist_1'},
-               MAP {},
-               '[]', 'UNSET', NULL
-             );",
+               JSON '{"traceloop.association.properties.session_id": "ses_hist_1"}'::VARIANT,
+               JSON '{}'::VARIANT,
+               JSON '[]'::VARIANT, 'UNSET', NULL
+             );"#,
         )
         .expect("insert historical rows");
 

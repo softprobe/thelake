@@ -39,7 +39,7 @@ SELECT
     CAST(links AS JSON) AS links,
     status_code,
     status_message,
-    events,
+    CAST(events AS JSON) AS events,
     observation_type,
     model_name,
     model_provider,

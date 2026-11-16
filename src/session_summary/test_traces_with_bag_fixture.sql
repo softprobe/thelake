@@ -14,7 +14,7 @@ CREATE TABLE traces (
     user_id VARCHAR,
     model_name VARCHAR,
     record_date DATE,
-    attributes MAP(VARCHAR, VARCHAR),
+    attributes VARIANT,
     trace_id VARCHAR DEFAULT 'tr_default',
     parent_span_id VARCHAR DEFAULT NULL
 );

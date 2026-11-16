@@ -1686,14 +1686,14 @@ async fn otel_genai_hierarchy_serves_canonical_types_leaf_tokens_clean_json_and_
         .expect("bounded gen span");
     assert_eq!(
         bounded_gen["attributes"]["gen_ai.response.finish_reasons"],
-        "[\"stop\"]"
+        serde_json::json!(["stop"])
     );
     let bounded_log = &bounded_session_json["logs"]
         .as_array()
         .expect("bounded session logs")[0];
     assert_eq!(
         bounded_log["resource_attributes"]["process.command_args"],
-        "[\"node\"]"
+        serde_json::json!(["node"])
     );
     assert_eq!(bounded_log["attributes"]["empty_meta"], "");
 
@@ -1724,14 +1724,14 @@ async fn otel_genai_hierarchy_serves_canonical_types_leaf_tokens_clean_json_and_
         .expect("trace details gen span");
     assert_eq!(
         details_gen["attributes"]["gen_ai.response.finish_reasons"],
-        "[\"stop\"]"
+        serde_json::json!(["stop"])
     );
     let details_log = &trace_details_json["logs"]
         .as_array()
         .expect("trace details logs")[0];
     assert_eq!(
         details_log["resource_attributes"]["process.command_args"],
-        "[\"node\"]"
+        serde_json::json!(["node"])
     );
 }
 

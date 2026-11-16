@@ -11,11 +11,11 @@ use tempfile::TempDir;
 use crate::util::config::file_backed_test_config;
 use serde_json::Value;
 
-fn assert_map_dtype(dtype: &str, column: &str) {
+fn assert_variant_dtype(dtype: &str, column: &str) {
     let normalized = dtype.to_ascii_uppercase();
     assert!(
-        normalized == "MAP" || normalized.starts_with("MAP(") || normalized.starts_with("MAP "),
-        "{column} must be MAP(VARCHAR, VARCHAR), got {dtype}"
+        normalized == "VARIANT" || normalized.starts_with("VARIANT"),
+        "{column} must be VARIANT, got {dtype}"
     );
 }
 
@@ -133,14 +133,14 @@ async fn map_bags_hot_paths_and_nested_filters() {
         .expect("map")
         .map(|r| r.expect("row"))
         .collect();
-    assert_map_dtype(
+    assert_variant_dtype(
         types
             .get("attributes")
             .map(String::as_str)
             .unwrap_or("<missing>"),
         "traces.attributes",
     );
-    assert_map_dtype(
+    assert_variant_dtype(
         types
             .get("resource_attributes")
             .map(String::as_str)
@@ -486,16 +486,16 @@ async fn map_write_fails_fast_on_legacy_variant_table() {
     let mut config = file_backed_test_config(&temp);
     config.ducklake.data_inlining_row_limit = Some(0);
 
-    // Fresh catalog: create the complete canonical schema with legacy VARIANT
+    // Fresh catalog: create the complete canonical schema with legacy MAP(VARCHAR, VARCHAR)
     // attributes first (no DROP). Writer CREATE IF NOT EXISTS leaves it alone;
-    // the clean-cutover check must identify the incompatible hot-column type.
+    // the clean-cutover check must identify the incompatible attribute-column type.
     {
         let conn = attach(&config.ducklake);
         let legacy_ddl = include_str!("../../src/sql/schema/traces.sql")
             .replace("CREATE TABLE IF NOT EXISTS", "CREATE TABLE")
-            .replace("MAP(VARCHAR, VARCHAR)", "VARIANT");
+            .replace("VARIANT", "MAP(VARCHAR, VARCHAR)");
         conn.execute_batch(&legacy_ddl)
-            .expect("create canonical table with leftover variant columns");
+            .expect("create canonical table with leftover map columns");
         let dtype: String = conn
             .query_row(
                 "SELECT column_type FROM (DESCRIBE traces) WHERE column_name = 'attributes';",
@@ -504,8 +504,8 @@ async fn map_write_fails_fast_on_legacy_variant_table() {
             )
             .expect("describe attributes type");
         assert!(
-            dtype.to_ascii_uppercase().contains("VARIANT"),
-            "precondition: leftover table should be VARIANT, got {dtype}"
+            dtype.to_ascii_uppercase().starts_with("MAP"),
+            "precondition: leftover table should be MAP, got {dtype}"
         );
     }
 
@@ -516,13 +516,13 @@ async fn map_write_fails_fast_on_legacy_variant_table() {
     }
 
     let err = match init_result {
-        Ok(_) => panic!("leftover VARIANT table must fail fast"),
+        Ok(_) => panic!("leftover MAP table must fail fast"),
         Err(error) => error,
     };
     let message = err.to_string();
     assert!(
-        message.contains("VARIANT"),
-        "error must mention leftover VARIANT: {message}"
+        message.to_ascii_uppercase().contains("MAP"),
+        "error must mention leftover MAP: {message}"
     );
     assert!(
         message.contains("clean cutover is required"),
