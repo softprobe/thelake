@@ -480,7 +480,7 @@ impl TraceQueryBackend for DuckLakeTraceBackend {
             if start > end {
                 return Err(CompatError::new(
                     CompatErrorCode::BadRequest,
-                    "`start` must be < `end`",
+                    "`start` must be <= `end`",
                 ));
             }
         }
@@ -522,7 +522,7 @@ impl TraceQueryBackend for DuckLakeTraceBackend {
             if start > end {
                 return Err(CompatError::new(
                     CompatErrorCode::BadRequest,
-                    "`start` must be < `end`",
+                    "`start` must be <= `end`",
                 ));
             }
         }

@@ -544,6 +544,65 @@ async fn assert_tempo_summary_fidelity_and_windowed_tags(mode: WorkspaceScopeMod
     assert_eq!(status, StatusCode::OK);
     assert_eq!(all_legacy_vals["tagValues"], json!(["v1"]));
 
+    let legacy_start_sec = recent_start_sec - 4 * 86_400;
+    let legacy_end_sec = recent_start_sec - 2 * 86_400;
+    let (status, legacy_window_tags) = get_json(
+        &router,
+        &read_tok,
+        &format!("/api/search/tags?start={legacy_start_sec}&end={legacy_end_sec}"),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "legacy_window_tags={legacy_window_tags}"
+    );
+    let legacy_tag_list = legacy_window_tags["tagNames"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(Value::as_str)
+        .collect::<Vec<_>>();
+    assert!(
+        legacy_tag_list.contains(&"legacy.only.attr"),
+        "non-trailing historical /api/search/tags must scan DuckLake and include 3-day-old tags: {legacy_tag_list:?}"
+    );
+
+    let (status, recent_method_vals) = get_json(
+        &router,
+        &read_tok,
+        &format!(
+            "/api/search/tag/http.request.method/values?start={recent_start_sec}&end={recent_end_sec}"
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let method_vals = recent_method_vals["tagValues"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(Value::as_str)
+        .collect::<Vec<_>>();
+    assert!(
+        method_vals.contains(&"GET") && method_vals.contains(&"POST"),
+        "expected span-only http.request.method values in trailing window: {method_vals:?}"
+    );
+
+    let (status, legacy_event_vals) = get_json(
+        &router,
+        &read_tok,
+        "/api/search/tag/legacy.event.attr/values",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        !legacy_event_vals["tagValues"]
+            .as_array()
+            .unwrap()
+            .is_empty(),
+        "event-attributed tag must retain its values via source_mask: {legacy_event_vals}"
+    );
+
     let (status, _) = get_json(
         &router,
         &read_tok,

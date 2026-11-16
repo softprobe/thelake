@@ -56,14 +56,14 @@ impl TagFlushThrottle {
 
     pub fn filter_due(&self, entries: Vec<TagEntry>, now: Instant) -> Vec<TagEntry> {
         let mut guard = self.last_flushed.lock().expect("tag flush throttle lock");
+        let window_ns = i64::try_from(self.window.as_nanos()).unwrap_or(i64::MAX);
         let mut due = Vec::new();
         for mut entry in entries {
             let (is_due, merged_mask, merged_ts) = match guard.get(&entry.tag) {
                 Some(&(prev_at, prev_mask, prev_ts)) => {
                     let window_elapsed = now.saturating_duration_since(prev_at) >= self.window;
                     let new_source_bit = (entry.source_mask & !prev_mask) != 0;
-                    let newer_event_time =
-                        entry.last_seen_ns > prev_ts.saturating_add(TAG_FLUSH_WINDOW_NS);
+                    let newer_event_time = entry.last_seen_ns > prev_ts.saturating_add(window_ns);
                     (
                         window_elapsed || new_source_bit || newer_event_time,
                         prev_mask | entry.source_mask,
@@ -220,6 +220,9 @@ impl TagIndexReader {
         min_last_seen_ns: i64,
         limit: usize,
     ) -> Result<Option<Vec<String>>> {
+        if limit == 0 {
+            return Ok(Some(Vec::new()));
+        }
         let client = self
             .pool
             .get()
@@ -550,6 +553,7 @@ mod tests {
         assert!(out.is_empty());
         let reader = TagIndexReader::new(unreachable_pool(), "s", "ws");
         assert!(reader.list(0).await.unwrap().is_empty());
+        assert_eq!(reader.list_since(0, 0).await.unwrap(), Some(Vec::new()));
         assert!(reader.list(5).await.is_err());
     }
 
@@ -732,6 +736,16 @@ mod tests {
             due3[0].source_mask,
             TAG_SOURCE_SPAN_OR_RESOURCE | TAG_SOURCE_EVENT_OR_LINK
         );
+
+        let due4 = throttle.filter_due(
+            vec![TagEntry {
+                tag: "a".into(),
+                last_seen_ns: 60_000_000_200,
+                source_mask: TAG_SOURCE_SPAN_OR_RESOURCE,
+            }],
+            t0 + Duration::from_secs(7),
+        );
+        assert_eq!(due4.len(), 1);
     }
 
     #[tokio::test]

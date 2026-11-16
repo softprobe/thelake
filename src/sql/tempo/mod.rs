@@ -312,22 +312,20 @@ fn trimmed_map_json_expr(
     preserve_keys: &std::collections::BTreeSet<String>,
 ) -> String {
     let keep_predicate = if preserve_keys.is_empty() {
-        "e.value IS NULL OR length(e.value) <= 4096".to_string()
+        "e.value IS NULL OR strlen(e.value) <= 4096".to_string()
     } else {
         let quoted = preserve_keys
             .iter()
             .map(|k| sql_string_literal(k))
             .collect::<Vec<_>>()
             .join(", ");
-        format!("e.value IS NULL OR length(e.value) <= 4096 OR e.key IN ({quoted})")
+        format!("e.value IS NULL OR strlen(e.value) <= 4096 OR e.key IN ({quoted})")
     };
     format!(
-        "CASE \
-            WHEN {column} IS NULL THEN NULL \
-            WHEN TRY_CAST({column} AS MAP(VARCHAR, VARCHAR)) IS NOT NULL \
-                THEN CAST(MAP_FROM_ENTRIES(list_filter(map_entries(TRY_CAST({column} AS MAP(VARCHAR, VARCHAR))), e -> {keep_predicate})) AS JSON) \
-            ELSE CAST({column} AS JSON) \
-        END"
+        "COALESCE(\
+            CAST(MAP_FROM_ENTRIES(list_filter(map_entries(TRY_CAST({column} AS MAP(VARCHAR, VARCHAR))), e -> {keep_predicate})) AS JSON), \
+            CAST({column} AS JSON)\
+        )"
     )
 }
 
@@ -1153,7 +1151,7 @@ mod tests {
         let empty = BTreeMap::new();
         let unfiltered = trace_scan_sql(windowed(&empty, None, None, None, 10), None)
             .expect("unfiltered summary sql");
-        assert!(unfiltered.as_str().contains("length(e.value) <= 4096"));
+        assert!(unfiltered.as_str().contains("strlen(e.value) <= 4096"));
 
         let tags = BTreeMap::from([
             (String::from("service.name"), String::from("checkout-api")),
@@ -1161,7 +1159,7 @@ mod tests {
         ]);
         let tags_sql =
             trace_scan_sql(windowed(&tags, None, None, None, 10), None).expect("tags summary sql");
-        assert!(tags_sql.as_str().contains("length(e.value) <= 4096"));
+        assert!(tags_sql.as_str().contains("strlen(e.value) <= 4096"));
         assert!(!tags_sql.as_str().contains("CAST(links AS JSON)"));
         assert!(!tags_sql
             .as_str()
@@ -1172,6 +1170,6 @@ mod tests {
             Some("0123456789abcdef0123456789abcdef"),
         )
         .expect("lookup sql");
-        assert!(!lookup_sql.as_str().contains("length(e.value) <= 4096"));
+        assert!(!lookup_sql.as_str().contains("strlen(e.value) <= 4096"));
     }
 }
