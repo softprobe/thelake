@@ -314,6 +314,14 @@ pub fn runtime_control_routes() -> Router<AppState> {
         .route("/v1/meta", get(v1_meta))
         .route("/v1/data/ducklake-connection", get(v1_ducklake_connection))
         .route("/v1/promotions/apply", post(v1_promotions_apply))
+        .route(
+            "/v1/promotions/recommendations",
+            get(v1_promotions_recommendations),
+        )
+        .route(
+            "/v1/promotions/recommendations/approve",
+            post(v1_promotions_approve),
+        )
 }
 
 async fn v1_ducklake_connection(
@@ -407,6 +415,109 @@ async fn apply_telemetry_promotion(
         },
         "schemaChanges": telemetry_schema_changes(&spec)
     })))
+}
+
+async fn v1_promotions_recommendations(
+    State(state): State<AppState>,
+    Extension(auth): Extension<WorkspaceAuth>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let ws = state
+        .workspace_for_auth(&auth)
+        .await
+        .map_err(|err| promotion_apply_error("ducklake_scope_unavailable", err))?;
+    let active = ws
+        .admin()
+        .load_active_telemetry_promotions()
+        .await
+        .map_err(|err| promotion_apply_error("promotion_load_failed", err))?;
+    let usage = state
+        .workspaces
+        .promotion_usage()
+        .snapshot(&auth.workspace_id);
+    let recommendations =
+        crate::promotion_recommendations::build_recommendations(&ws, &usage, &active)
+            .await
+            .map_err(|err| promotion_apply_error("promotion_recommendation_failed", err))?;
+    let active_columns = crate::promotion_recommendations::active_promoted_views(&active);
+    Ok(Json(json!({
+        "specVersion": "softprobe.promotion.recommendations.v1",
+        "activeColumns": active_columns,
+        "recommendations": recommendations
+    })))
+}
+
+async fn v1_promotions_approve(
+    State(state): State<AppState>,
+    Extension(auth): Extension<WorkspaceAuth>,
+    Json(req): Json<crate::promotion_recommendations::ApprovePromotionRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let key = req.attribute_key.trim();
+    if key.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(
+                json!({"error": {"code": "invalid_request", "message": "attributeKey must not be empty"}}),
+            ),
+        ));
+    }
+    let col_name = req
+        .column_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| crate::promotion_recommendations::suggest_column_name(req.source, key));
+    let data_type = match req.data_type.as_deref() {
+        Some(raw) => crate::promotion_recommendations::parse_promotion_data_type(raw).ok_or_else(
+            || {
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"error": {"code": "invalid_request", "message": "unsupported promotion dataType"}})),
+                )
+            },
+        )?,
+        None => crate::promotion::PromotionDataType::String,
+    };
+    let ws = state
+        .workspace_for_auth(&auth)
+        .await
+        .map_err(|err| promotion_apply_error("ducklake_scope_unavailable", err))?;
+    let active = ws
+        .admin()
+        .load_active_telemetry_promotions()
+        .await
+        .map_err(|err| promotion_apply_error("promotion_load_failed", err))?;
+    let manifest_yaml = crate::promotion_recommendations::merge_column_into_active_manifest(
+        req.table.to_telemetry_table(),
+        &active,
+        crate::promotion::PromotionColumn {
+            name: col_name,
+            data_type,
+            nullable: true,
+            source: req.source.to_promotion_source(key.to_string()),
+        },
+    )
+    .map_err(|err| {
+        (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(json!({"error": {"code": err.code(), "message": err.to_string()}})),
+        )
+    })?;
+    let manifest = parse_promotion_manifest(&manifest_yaml).map_err(|err| {
+        (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(json!({"error": {"code": err.code(), "message": err.to_string()}})),
+        )
+    })?;
+    let PromotionManifest::TelemetryColumns(spec) = manifest else {
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(
+                json!({"error": {"code": "internal_error", "message": "unexpected manifest kind"}}),
+            ),
+        ));
+    };
+    apply_telemetry_promotion(state, auth, manifest_yaml, spec).await
 }
 
 async fn apply_business_table_promotion(

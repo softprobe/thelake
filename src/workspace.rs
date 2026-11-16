@@ -147,6 +147,7 @@ pub struct WorkspaceManager {
     control_plane: Option<ControlPlaneRuntime>,
     scope_registry: DuckLakeScopeResolver,
     catalog_sessions: CatalogSessions,
+    promotion_usage: Arc<crate::promotion_recommendations::AttrUsageTracker>,
     #[cfg(test)]
     build_counter: AtomicUsize,
 }
@@ -159,6 +160,7 @@ impl WorkspaceManager {
             .expect("test PostgreSQL config should build without connecting");
         Self {
             catalog_sessions: CatalogSessions::new(Arc::clone(&config), scope_registry.clone()),
+            promotion_usage: Arc::new(crate::promotion_recommendations::AttrUsageTracker::new()),
             config,
             workspaces: DashMap::new(),
             creation_locks: DashMap::new(),
@@ -178,6 +180,7 @@ impl WorkspaceManager {
         let scope_registry = DuckLakeScopeResolver::connect(config.as_ref()).await?;
         Ok(Self {
             catalog_sessions: CatalogSessions::new(Arc::clone(&config), scope_registry.clone()),
+            promotion_usage: Arc::new(crate::promotion_recommendations::AttrUsageTracker::new()),
             config,
             workspaces: DashMap::new(),
             creation_locks: DashMap::new(),
@@ -188,6 +191,10 @@ impl WorkspaceManager {
             #[cfg(test)]
             build_counter: AtomicUsize::new(0),
         })
+    }
+
+    pub fn promotion_usage(&self) -> &Arc<crate::promotion_recommendations::AttrUsageTracker> {
+        &self.promotion_usage
     }
 
     pub fn control_plane(&self) -> Option<&ControlPlaneRuntime> {
