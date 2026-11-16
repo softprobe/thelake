@@ -4,6 +4,7 @@ use crate::sql::bounds::push_otlp_ns_window_predicates;
 use crate::sql::literal::sql_string_literal;
 use crate::sql::trusted::{approved_query, TrustedSql, TrustedSqlError};
 
+const PROMOTION_STATS_TEMPLATE: &str = include_str!("promotion_stats.sql");
 const SAMPLE_ROW_LIMIT: usize = 10_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -56,7 +57,7 @@ pub(crate) fn compile_attribute_stats_query(
     candidates: &[StatsCandidateKey],
 ) -> Result<TrustedSql, TrustedSqlError> {
     if candidates.is_empty() {
-        return approved_query("SELECT 0::BIGINT AS total_rows WHERE FALSE");
+        return Err(TrustedSqlError::Empty);
     }
 
     let mut time_predicates = Vec::new();
@@ -104,12 +105,12 @@ pub(crate) fn compile_attribute_stats_query(
         ));
     }
 
-    let sql = format!(
-        "WITH sampled AS (SELECT {sample_cols} FROM {table_name}{where_clause} LIMIT {SAMPLE_ROW_LIMIT}) SELECT {agg_cols} FROM sampled",
-        sample_cols = sample_projections.join(", "),
-        table_name = table.table_name(),
-        agg_cols = agg_projections.join(", "),
-    );
+    let sql = PROMOTION_STATS_TEMPLATE
+        .replace("{{sample_cols}}", &sample_projections.join(", "))
+        .replace("{{table_name}}", table.table_name())
+        .replace("{{where_clause}}", &where_clause)
+        .replace("{{sample_limit}}", &SAMPLE_ROW_LIMIT.to_string())
+        .replace("{{agg_cols}}", &agg_projections.join(", "));
     approved_query(sql)
 }
 
@@ -136,7 +137,8 @@ mod tests {
         )
         .expect("trusted sql");
         let sql = query.as_str();
-        assert!(sql.contains("FROM traces WHERE "));
+        assert!(sql.contains("FROM traces"));
+        assert!(sql.contains("WHERE "));
         assert!(sql.contains("start_time"));
         assert!(sql.contains("LIMIT 10000"));
         assert!(
