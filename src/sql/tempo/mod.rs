@@ -242,9 +242,8 @@ fn compile_trace_scan_sql(
     };
     let has_row_filter =
         !params.tags.is_empty() || !matches!(params.selector, None | Some(TraceSelector::All));
-    let can_use_summary_projection = trace_id.is_none()
-        && params.tags.is_empty()
-        && !params.selector.is_some_and(selector_uses_instrumentation);
+    let can_use_summary_projection =
+        trace_id.is_none() && !params.selector.is_some_and(selector_uses_instrumentation);
     let template = if is_plain_trace_lookup {
         TRACE_LOOKUP_SCAN_SQL
     } else if !has_row_filter && can_use_summary_projection {
@@ -260,6 +259,13 @@ fn compile_trace_scan_sql(
     } else {
         ""
     };
+    let mut preserve_keys: std::collections::BTreeSet<String> =
+        params.tags.keys().cloned().collect();
+    if let Some(selector) = params.selector {
+        collect_selector_keys(selector, &mut preserve_keys);
+    }
+    let trimmed_attributes = trimmed_map_json_expr("attributes", &preserve_keys);
+    let trimmed_resource_attributes = trimmed_map_json_expr("resource_attributes", &preserve_keys);
 
     Ok(window
         .scan_with_timestamp_filter("", |bound| {
@@ -276,8 +282,51 @@ fn compile_trace_scan_sql(
                 .replace("{{duration_predicate}}", &duration_predicate)
                 .replace("{{trace_limit}}", &trace_limit.to_string())
                 .replace("{{cap}}", &cap.to_string())
+                .replace("{{trimmed_attributes}}", &trimmed_attributes)
+                .replace(
+                    "{{trimmed_resource_attributes}}",
+                    &trimmed_resource_attributes,
+                )
         })
         .into_sql())
+}
+
+fn collect_selector_keys(selector: &TraceSelector, keys: &mut std::collections::BTreeSet<String>) {
+    match selector {
+        TraceSelector::All => {}
+        TraceSelector::And(left, right) | TraceSelector::Or(left, right) => {
+            collect_selector_keys(left, keys);
+            collect_selector_keys(right, keys);
+        }
+        TraceSelector::Predicate(predicate) => match predicate_field(predicate) {
+            TraceField::Span(key) | TraceField::Unscoped(key) | TraceField::Resource(key) => {
+                keys.insert(key.clone());
+            }
+            TraceField::Instrumentation(_) | TraceField::Intrinsic(_) => {}
+        },
+    }
+}
+
+fn trimmed_map_json_expr(
+    column: &str,
+    preserve_keys: &std::collections::BTreeSet<String>,
+) -> String {
+    let keep_predicate = if preserve_keys.is_empty() {
+        "e.value IS NULL OR strlen(e.value) <= 4096".to_string()
+    } else {
+        let quoted = preserve_keys
+            .iter()
+            .map(|k| sql_string_literal(k))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!("e.value IS NULL OR strlen(e.value) <= 4096 OR e.key IN ({quoted})")
+    };
+    format!(
+        "COALESCE(\
+            CAST(MAP_FROM_ENTRIES(list_filter(map_entries(TRY_CAST({column} AS MAP(VARCHAR, VARCHAR))), e -> {keep_predicate})) AS JSON), \
+            CAST({column} AS JSON)\
+        )"
+    )
 }
 
 fn selector_uses_instrumentation(selector: &TraceSelector) -> bool {
@@ -997,8 +1046,8 @@ mod tests {
 
         let tags = BTreeMap::from([(String::from("exception.type"), String::from("Timeout"))]);
         let tag_sql = trace_scan_sql(windowed(&tags, None, None, None, 10), None).expect("sql");
-        assert!(tag_sql.as_str().contains("events"));
-        assert!(tag_sql.as_str().contains("CAST(links AS JSON)"));
+        assert!(!tag_sql.as_str().contains("events"));
+        assert!(!tag_sql.as_str().contains("CAST(links AS JSON)"));
 
         let lookup_sql = trace_scan_sql(
             windowed(&empty, None, None, None, 10),
@@ -1095,5 +1144,32 @@ mod tests {
             .next()
             .expect("filter_base section");
         assert!(inst_head.contains("instrumentation_scope"));
+    }
+
+    #[test]
+    fn summary_scan_caps_oversized_attribute_values_and_allows_tags_query() {
+        let empty = BTreeMap::new();
+        let unfiltered = trace_scan_sql(windowed(&empty, None, None, None, 10), None)
+            .expect("unfiltered summary sql");
+        assert!(unfiltered.as_str().contains("strlen(e.value) <= 4096"));
+
+        let tags = BTreeMap::from([
+            (String::from("service.name"), String::from("checkout-api")),
+            (String::from("http.request.method"), String::from("POST")),
+        ]);
+        let tags_sql =
+            trace_scan_sql(windowed(&tags, None, None, None, 10), None).expect("tags summary sql");
+        assert!(tags_sql.as_str().contains("strlen(e.value) <= 4096"));
+        assert!(!tags_sql.as_str().contains("CAST(links AS JSON)"));
+        assert!(!tags_sql
+            .as_str()
+            .contains("CAST(instrumentation_scope AS JSON)"));
+
+        let lookup_sql = trace_scan_sql(
+            windowed(&empty, None, None, None, 10),
+            Some("0123456789abcdef0123456789abcdef"),
+        )
+        .expect("lookup sql");
+        assert!(!lookup_sql.as_str().contains("strlen(e.value) <= 4096"));
     }
 }

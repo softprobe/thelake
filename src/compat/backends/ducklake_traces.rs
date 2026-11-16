@@ -301,17 +301,50 @@ impl DuckLakeTraceBackend {
     }
 }
 
+const TRAILING_WINDOW_SLACK_NS: i64 = 120_000_000_000;
+
+fn trailing_tag_index_min_last_seen_ns(bounds: TraceLookupBounds, now_ns: i64) -> Option<i64> {
+    if let Some(end) = bounds.end_ns {
+        if end < now_ns.saturating_sub(TRAILING_WINDOW_SLACK_NS) {
+            return None;
+        }
+    }
+    Some(bounds.start_ns.map_or(i64::MIN, |start| {
+        start.saturating_sub(crate::tag_index::TAG_FLUSH_WINDOW_NS)
+    }))
+}
+
 async fn try_read_tag_index(
     tag_index: Option<&crate::tag_index::TagIndexReader>,
+    bounds: TraceLookupBounds,
     max_series: usize,
 ) -> Option<Vec<String>> {
     let reader = tag_index?;
-    match reader.list(max_series).await {
-        Ok(tags) if !tags.is_empty() => Some(tags),
-        Ok(_) => None,
+    let now_ns = chrono::Utc::now().timestamp_nanos_opt().unwrap_or(i64::MAX);
+    let min_last_seen_ns = trailing_tag_index_min_last_seen_ns(bounds, now_ns)?;
+    match reader.list_since(min_last_seen_ns, max_series).await {
+        Ok(Some(tags)) => Some(tags),
+        Ok(None) => None,
         Err(err) => {
             tracing::warn!(error = %err, "tag_index read failed; falling back to DuckLake scan");
             None
+        }
+    }
+}
+
+async fn should_scan_event_link_tags(
+    tag_index: Option<&crate::tag_index::TagIndexReader>,
+    tag: &str,
+) -> bool {
+    let Some(reader) = tag_index else {
+        return true;
+    };
+    match reader.source_mask(tag).await {
+        Ok(Some(mask)) => (mask & crate::tag_index::TAG_SOURCE_EVENT_OR_LINK) != 0,
+        Ok(None) => true,
+        Err(err) => {
+            tracing::warn!(error = %err, "tag_index source_mask failed; scanning event/link tags");
+            true
         }
     }
 }
@@ -444,13 +477,17 @@ impl TraceQueryBackend for DuckLakeTraceBackend {
             if start == end {
                 return Ok(Vec::new());
             }
-        }
-        if bounds.start_ns.is_none() && bounds.end_ns.is_none() {
-            if let Some(tags) =
-                try_read_tag_index(self.tag_index.as_ref(), ctx.limits.max_series).await
-            {
-                return Ok(tags);
+            if start > end {
+                return Err(CompatError::new(
+                    CompatErrorCode::BadRequest,
+                    "`start` must be <= `end`",
+                ));
             }
+        }
+        if let Some(tags) =
+            try_read_tag_index(self.tag_index.as_ref(), bounds, ctx.limits.max_series).await
+        {
+            return Ok(tags);
         }
         let trusted = tag_names_map_keys_sql(bounds.start_ns, bounds.end_ns, ctx.limits.max_series)
             .map_err(|msg| CompatError::new(CompatErrorCode::BadRequest, msg))?;
@@ -482,6 +519,12 @@ impl TraceQueryBackend for DuckLakeTraceBackend {
             if start == end {
                 return Ok(Vec::new());
             }
+            if start > end {
+                return Err(CompatError::new(
+                    CompatErrorCode::BadRequest,
+                    "`start` must be <= `end`",
+                ));
+            }
         }
         let trusted = tag_values_sql(tag, bounds.start_ns, bounds.end_ns, ctx.limits.max_series)
             .map_err(|msg| CompatError::new(CompatErrorCode::BadRequest, msg))?;
@@ -492,9 +535,11 @@ impl TraceQueryBackend for DuckLakeTraceBackend {
                 values.insert(value);
             }
         }
-        for (key, value) in self.event_link_tags(ctx, bounds).await? {
-            if key == tag {
-                values.insert(value);
+        if should_scan_event_link_tags(self.tag_index.as_ref(), tag).await {
+            for (key, value) in self.event_link_tags(ctx, bounds).await? {
+                if key == tag {
+                    values.insert(value);
+                }
             }
         }
         Ok(values.into_iter().take(ctx.limits.max_series).collect())
@@ -1748,7 +1793,9 @@ mod tests {
 
     #[tokio::test]
     async fn try_read_tag_index_returns_none_when_absent_or_unreachable() {
-        assert!(try_read_tag_index(None, 100).await.is_none());
+        assert!(try_read_tag_index(None, TraceLookupBounds::default(), 100)
+            .await
+            .is_none());
 
         let mut pg = tokio_postgres::Config::new();
         pg.host("127.0.0.1");
@@ -1767,7 +1814,11 @@ mod tests {
             .build()
             .unwrap();
         let reader = crate::tag_index::TagIndexReader::new(pool, "s", "ws");
-        assert!(try_read_tag_index(Some(&reader), 100).await.is_none());
+        assert!(
+            try_read_tag_index(Some(&reader), TraceLookupBounds::default(), 100)
+                .await
+                .is_none()
+        );
     }
 
     #[tokio::test]
@@ -1801,19 +1852,117 @@ mod tests {
             .unwrap();
 
         let reader = crate::tag_index::TagIndexReader::new(pool.clone(), schema, "ws-backend");
-        assert!(try_read_tag_index(Some(&reader), 100).await.is_none());
+        assert!(
+            try_read_tag_index(Some(&reader), TraceLookupBounds::default(), 100)
+                .await
+                .is_none()
+        );
 
         let writer = crate::tag_index::TagIndexWriter::new(pool, schema, "ws-backend");
         writer
             .upsert_entries(&[crate::tag_index::TagEntry {
                 tag: "http.method".into(),
                 last_seen_ns: 42,
+                source_mask: crate::tag_index::TAG_SOURCE_SPAN_OR_RESOURCE,
             }])
             .await
             .unwrap();
         assert_eq!(
-            try_read_tag_index(Some(&reader), 100).await,
+            try_read_tag_index(Some(&reader), TraceLookupBounds::default(), 100).await,
             Some(vec!["http.method".to_string()])
+        );
+        assert!(
+            !should_scan_event_link_tags(Some(&reader), "http.method").await,
+            "span-only tag must skip event/link DuckLake scan"
+        );
+        assert!(
+            should_scan_event_link_tags(Some(&reader), "unindexed.tag").await,
+            "unindexed tag must fall back to event/link scan"
+        );
+        writer
+            .upsert_entries(&[crate::tag_index::TagEntry {
+                tag: "http.method".into(),
+                last_seen_ns: 43,
+                source_mask: crate::tag_index::TAG_SOURCE_EVENT_OR_LINK,
+            }])
+            .await
+            .unwrap();
+        assert!(
+            should_scan_event_link_tags(Some(&reader), "http.method").await,
+            "tag with event/link bit must scan event/link tags"
+        );
+    }
+
+    #[tokio::test]
+    async fn should_scan_event_link_tags_defaults_to_true_when_absent_or_unreachable() {
+        assert!(should_scan_event_link_tags(None, "http.method").await);
+        let mut pg = tokio_postgres::Config::new();
+        pg.host("127.0.0.1");
+        pg.port(1);
+        pg.dbname("x");
+        pg.user("x");
+        let mgr = deadpool_postgres::Manager::from_config(
+            pg,
+            tokio_postgres::NoTls,
+            deadpool_postgres::ManagerConfig {
+                recycling_method: deadpool_postgres::RecyclingMethod::Fast,
+            },
+        );
+        let pool = deadpool_postgres::Pool::builder(mgr)
+            .max_size(1)
+            .build()
+            .unwrap();
+        let reader = crate::tag_index::TagIndexReader::new(pool, "s", "ws");
+        assert!(should_scan_event_link_tags(Some(&reader), "http.method").await);
+    }
+
+    #[test]
+    fn trailing_tag_index_min_last_seen_ns_handles_live_and_historical_windows() {
+        let now_ns = 1_700_000_000_000_000_000i64;
+        assert_eq!(
+            trailing_tag_index_min_last_seen_ns(TraceLookupBounds::default(), now_ns),
+            Some(i64::MIN)
+        );
+        let start = now_ns - 3_600_000_000_000;
+        assert_eq!(
+            trailing_tag_index_min_last_seen_ns(
+                TraceLookupBounds {
+                    start_ns: Some(start),
+                    end_ns: Some(now_ns - 30_000_000_000),
+                },
+                now_ns,
+            ),
+            Some(start - crate::tag_index::TAG_FLUSH_WINDOW_NS)
+        );
+        assert_eq!(
+            trailing_tag_index_min_last_seen_ns(
+                TraceLookupBounds {
+                    start_ns: Some(start),
+                    end_ns: None,
+                },
+                now_ns,
+            ),
+            Some(start - crate::tag_index::TAG_FLUSH_WINDOW_NS)
+        );
+        assert_eq!(
+            trailing_tag_index_min_last_seen_ns(
+                TraceLookupBounds {
+                    start_ns: Some(start),
+                    end_ns: Some(now_ns - 300_000_000_000),
+                },
+                now_ns,
+            ),
+            None
+        );
+        assert_eq!(
+            trailing_tag_index_min_last_seen_ns(
+                TraceLookupBounds {
+                    start_ns: None,
+                    end_ns: Some(now_ns - 300_000_000_000),
+                },
+                now_ns,
+            ),
+            None
         );
     }
 }

@@ -544,6 +544,65 @@ async fn assert_tempo_summary_fidelity_and_windowed_tags(mode: WorkspaceScopeMod
     assert_eq!(status, StatusCode::OK);
     assert_eq!(all_legacy_vals["tagValues"], json!(["v1"]));
 
+    let legacy_start_sec = recent_start_sec - 4 * 86_400;
+    let legacy_end_sec = recent_start_sec - 2 * 86_400;
+    let (status, legacy_window_tags) = get_json(
+        &router,
+        &read_tok,
+        &format!("/api/search/tags?start={legacy_start_sec}&end={legacy_end_sec}"),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "legacy_window_tags={legacy_window_tags}"
+    );
+    let legacy_tag_list = legacy_window_tags["tagNames"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(Value::as_str)
+        .collect::<Vec<_>>();
+    assert!(
+        legacy_tag_list.contains(&"legacy.only.attr"),
+        "non-trailing historical /api/search/tags must scan DuckLake and include 3-day-old tags: {legacy_tag_list:?}"
+    );
+
+    let (status, recent_method_vals) = get_json(
+        &router,
+        &read_tok,
+        &format!(
+            "/api/search/tag/http.request.method/values?start={recent_start_sec}&end={recent_end_sec}"
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let method_vals = recent_method_vals["tagValues"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(Value::as_str)
+        .collect::<Vec<_>>();
+    assert!(
+        method_vals.contains(&"GET") && method_vals.contains(&"POST"),
+        "expected span-only http.request.method values in trailing window: {method_vals:?}"
+    );
+
+    let (status, legacy_event_vals) = get_json(
+        &router,
+        &read_tok,
+        "/api/search/tag/legacy.event.attr/values",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        !legacy_event_vals["tagValues"]
+            .as_array()
+            .unwrap()
+            .is_empty(),
+        "event-attributed tag must retain its values via source_mask: {legacy_event_vals}"
+    );
+
     let (status, _) = get_json(
         &router,
         &read_tok,
@@ -763,6 +822,78 @@ async fn assert_tempo_deadline_and_http_burst_cancellation(mode: WorkspaceScopeM
         );
         assert_eq!(ok_body["traces"].as_array().unwrap().len(), 1);
     }
+
+    let (sum_status, sum_body) = get_json(
+        &router,
+        &read_tok,
+        &format!("/api/search?start={start_sec}&end={end_sec}&limit=5"),
+    )
+    .await;
+    assert_eq!(sum_status, StatusCode::OK, "sum_body={sum_body}");
+    let sum_traces = sum_body["traces"].as_array().unwrap();
+    assert!(!sum_traces.is_empty());
+    let has_heavy_in_summary = sum_traces.iter().any(|trace| {
+        trace["spanSet"]["spans"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|sp| {
+                sp["attributes"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .any(|attr| attr["key"] == "http.request.body.content")
+            })
+    });
+    assert!(
+        !has_heavy_in_summary,
+        "summary /api/search must omit oversized http.request.body.content: {sum_body}"
+    );
+
+    let (heavy_tag_status, heavy_tag_body) = get_json(
+        &router,
+        &read_tok,
+        &format!(
+            "/api/search?tags=http.request.body.content%3Dabcdefghij&start={start_sec}&end={end_sec}&limit=5"
+        ),
+    )
+    .await;
+    assert_eq!(
+        heavy_tag_status,
+        StatusCode::OK,
+        "heavy_tag_body={heavy_tag_body}"
+    );
+    assert!(
+        !heavy_tag_body["traces"].as_array().unwrap().is_empty(),
+        "filtered /api/search?tags=... must preserve referenced >4KB keys so matching traces are not dropped"
+    );
+
+    let mut bulk_trace_bytes = [0u8; 16];
+    bulk_trace_bytes[0..8].copy_from_slice(&1u64.to_be_bytes());
+    bulk_trace_bytes[8..16].copy_from_slice(&1000u64.to_be_bytes());
+    let bulk_trace_hex = hex::encode(bulk_trace_bytes);
+    let (full_status, full_body) = get_json(
+        &router,
+        &read_tok,
+        &format!("/api/v2/traces/{bulk_trace_hex}"),
+    )
+    .await;
+    assert_eq!(full_status, StatusCode::OK);
+    let full_has_heavy = full_body["trace"]["resourceSpans"][0]["scopeSpans"][0]["spans"][0]
+        ["attributes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|attr| {
+            attr["key"] == "http.request.body.content"
+                && attr["value"]["stringValue"]
+                    .as_str()
+                    .is_some_and(|v| v.len() == heavy_payload.len())
+        });
+    assert!(
+        full_has_heavy,
+        "full trace lookup must preserve the full 64 KB attribute body"
+    );
 
     let heal_after = self_heal_snapshot();
     assert_eq!(
