@@ -36,6 +36,8 @@ pub mod workspace_purge;
 pub mod workspace_shared_scope;
 
 #[cfg(feature = "integration-e2e")]
+pub mod ducklake_catalog_migration;
+#[cfg(feature = "integration-e2e")]
 pub mod ingest_coalesce;
 #[cfg(feature = "integration-e2e")]
 pub mod ingest_commit_query;

@@ -339,6 +339,20 @@ pub fn open_attached_from_config(
         &PhysicalScope::from_ducklake(config),
         data_inlining_row_limit,
         Some(&config.extension_path),
+        false,
+    )
+}
+
+/// Attach an existing DuckLake catalog with `AUTOMATIC_MIGRATION true` so
+/// DuckLake upgrades its metadata catalog tables (e.g. `1.0` -> `1.1`) in place.
+pub fn migrate_ducklake_catalog_from_config(
+    config: &crate::config::DuckLakeConfig,
+) -> AttachedSession {
+    open_attached_connection(
+        &PhysicalScope::from_ducklake(config),
+        config.data_inlining_row_limit,
+        Some(&config.extension_path),
+        true,
     )
 }
 
@@ -357,6 +371,7 @@ pub fn open_attached_from_warehouse(
         &PhysicalScope::new(metadata_path, data_path, catalog_alias, metadata_schema),
         data_inlining_row_limit,
         Some(&default_ext),
+        false,
     )
 }
 
@@ -366,6 +381,7 @@ pub(crate) fn open_attached_connection(
     scope: &PhysicalScope,
     data_inlining_row_limit: Option<u64>,
     extension_path: Option<&str>,
+    automatic_migration: bool,
 ) -> AttachedSession {
     let connection = open_in_memory_capped(QUERY_DUCKDB_THREADS, "512MB").expect("duckdb");
     let mut init_params = DuckDbInitParams::session(QUERY_DUCKDB_THREADS, "512MB");
@@ -383,10 +399,13 @@ pub(crate) fn open_attached_connection(
         configure_object_store(&connection, &config, warehouse).expect("object store");
     }
     let opts = ducklake_attach_options_for_scope(scope, false, data_inlining_row_limit);
-    let opts: Vec<String> = opts
+    let mut opts: Vec<String> = opts
         .into_iter()
         .filter(|o| !o.starts_with("CREATE_IF_NOT_EXISTS"))
         .collect();
+    if automatic_migration {
+        opts.push("AUTOMATIC_MIGRATION true".to_string());
+    }
     connection
         .execute_batch(&format!(
             "ATTACH 'ducklake:postgres:{}' AS {} ({});",
