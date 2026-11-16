@@ -37,8 +37,8 @@ patch="$(echo "$crate_version" | sed -n 's/^1\.[0-9][0-9][0-9]\([0-9][0-9]\)\..*
 }
 want="${major}.${minor}.${patch}"
 
-# .../duckdb-download/<triple>/<version>/libduckdb.so
-got="$(echo "$SOPATH" | sed -n 's#.*/duckdb-download/[^/][^/]*/\([0-9][0-9.]*\)/.*#\1#p')"
+# .../duckdb-download/<triple>/[v]<version>/libduckdb.so
+got="$(echo "$SOPATH" | sed -n 's#.*/duckdb-download/[^/][^/]*/v\{0,1\}\([0-9][0-9.]*\)/.*#\1#p')"
 
 if [ -z "$got" ]; then
     # Library came from somewhere without a version in its path (a vendored

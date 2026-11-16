@@ -64,18 +64,32 @@ command -v curl >/dev/null 2>&1 || {
 }
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
-archive="ducklake-v${duckdb_version}-${platform}.tar.gz"
-curl --fail --location --retry 3 \
-  --output "$tmp/$archive" \
-  "https://github.com/$repository/releases/download/$release/$archive"
-[[ -s "$tmp/$archive" ]] || { echo "DuckLake release is missing $archive" >&2; exit 1; }
-actual_archive_sha="$(sha256 "$tmp/$archive")"
-[[ "$actual_archive_sha" == "$platform_sha" ]] || {
-  echo "DuckLake archive checksum mismatch for $platform" >&2
-  exit 1
-}
-
-tar -xOzf "$tmp/$archive" "$platform/ducklake.duckdb_extension" > "$tmp/ducklake.duckdb_extension"
+if [[ "$repository" == "extensions.duckdb.org" ]]; then
+  archive="ducklake.duckdb_extension.gz"
+  url="https://extensions.duckdb.org/v${duckdb_version}/${platform}/${archive}"
+  curl --fail --location --retry 3 \
+    --output "$tmp/$archive" \
+    "$url"
+  [[ -s "$tmp/$archive" ]] || { echo "DuckLake release is missing $url" >&2; exit 1; }
+  actual_archive_sha="$(sha256 "$tmp/$archive")"
+  [[ "$actual_archive_sha" == "$platform_sha" ]] || {
+    echo "DuckLake archive checksum mismatch for $platform" >&2
+    exit 1
+  }
+  gzip -dc "$tmp/$archive" > "$tmp/ducklake.duckdb_extension"
+else
+  archive="ducklake-v${duckdb_version}-${platform}.tar.gz"
+  curl --fail --location --retry 3 \
+    --output "$tmp/$archive" \
+    "https://github.com/$repository/releases/download/$release/$archive"
+  [[ -s "$tmp/$archive" ]] || { echo "DuckLake release is missing $archive" >&2; exit 1; }
+  actual_archive_sha="$(sha256 "$tmp/$archive")"
+  [[ "$actual_archive_sha" == "$platform_sha" ]] || {
+    echo "DuckLake archive checksum mismatch for $platform" >&2
+    exit 1
+  }
+  tar -xOzf "$tmp/$archive" "$platform/ducklake.duckdb_extension" > "$tmp/ducklake.duckdb_extension"
+fi
 actual_extension_sha="$(sha256 "$tmp/ducklake.duckdb_extension")"
 [[ "$actual_extension_sha" == "$extension_sha" ]] || {
   echo "DuckLake extension checksum mismatch for $platform" >&2
