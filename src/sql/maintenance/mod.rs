@@ -1,5 +1,6 @@
 //! SQL-owned DuckLake compaction, watermark, and cleanup pass.
 
+pub(crate) mod migrate_variant;
 pub(crate) mod workspace_purge;
 
 use crate::sql::literal::sql_string_literal;

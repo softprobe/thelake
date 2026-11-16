@@ -1,4 +1,5 @@
 use crate::config::Config;
+use crate::sql::maintenance::migrate_variant as sql_templates;
 use crate::storage::ducklake::{configure_object_store, escape_sql_literal};
 use crate::storage::schema::attribute_map::is_variant_column;
 use anyhow::{anyhow, bail, Context, Result};
@@ -63,9 +64,7 @@ pub struct TableMigrationReport {
 
 pub fn validate_pg_ident(ident: &str) -> Result<()> {
     if ident.is_empty()
-        || !ident
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '_')
+        || !ident.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
         || ident.chars().next().is_some_and(|c| c.is_ascii_digit())
     {
         bail!("invalid Postgres identifier: {ident:?}");
@@ -96,7 +95,9 @@ pub fn build_column_projection(
             || is_variant_column(table_name, &lower))
             && !src_type.eq_ignore_ascii_case("VARIANT");
         if needs_variant_cast {
-            select_exprs.push(format!("TRY_CAST({src_name} AS JSON)::VARIANT AS {dst_name}"));
+            select_exprs.push(format!(
+                "TRY_CAST({src_name} AS JSON)::VARIANT AS {dst_name}"
+            ));
         } else {
             select_exprs.push((*src_name).to_string());
         }
@@ -176,13 +177,7 @@ pub async fn run_cli(args: MigrateVariantArgs) -> Result<()> {
 
 async fn table_columns(client: &Client, schema: &str, table: &str) -> Result<Vec<String>> {
     let rows = client
-        .query(
-            "SELECT column_name
-             FROM information_schema.columns
-             WHERE table_schema = $1 AND table_name = $2
-             ORDER BY ordinal_position",
-            &[&schema, &table],
-        )
+        .query(sql_templates::pg_table_columns_sql(), &[&schema, &table])
         .await?;
     Ok(rows.into_iter().map(|r| r.get(0)).collect())
 }
@@ -207,7 +202,7 @@ pub async fn migrate_postgres_metadata(
 
     let dst_scope_row = client
         .query_opt(
-            &format!("SELECT physical_scope_id FROM {dst_schema}.physical_scope LIMIT 1"),
+            &sql_templates::render_pg_physical_scope_sql(dst_schema),
             &[],
         )
         .await
@@ -222,18 +217,14 @@ pub async fn migrate_postgres_metadata(
 
     let src_workspaces: i64 = client
         .query_one(
-            &format!(
-                "SELECT COUNT(*) FROM {src_schema}.workspace_scope_binding WHERE workspace_id <> '__self_monitoring__'"
-            ),
+            &sql_templates::render_pg_workspace_count_sql(src_schema),
             &[],
         )
         .await?
         .get(0);
     let workspaces_before: i64 = client
         .query_one(
-            &format!(
-                "SELECT COUNT(*) FROM {dst_schema}.workspace_scope_binding WHERE workspace_id <> '__self_monitoring__'"
-            ),
+            &sql_templates::render_pg_workspace_count_sql(dst_schema),
             &[],
         )
         .await?
@@ -265,25 +256,17 @@ pub async fn migrate_postgres_metadata(
             })
             .collect::<Vec<_>>()
             .join(", ");
-        let sql = format!(
-            "INSERT INTO {dst_schema}.workspace_scope_binding ({insert_list})
-             SELECT {select_list}
-             FROM {src_schema}.workspace_scope_binding
-             WHERE workspace_id <> '__self_monitoring__'
-             ON CONFLICT (workspace_id) DO NOTHING"
+        let sql = sql_templates::render_pg_copy_workspaces_sql(
+            src_schema,
+            dst_schema,
+            &insert_list,
+            &select_list,
         );
         client.execute(&sql, &[&dst_physical_scope_id]).await?;
 
         let missing: i64 = client
             .query_one(
-                &format!(
-                    "SELECT COUNT(*) FROM {src_schema}.workspace_scope_binding s
-                     WHERE s.workspace_id <> '__self_monitoring__'
-                       AND NOT EXISTS (
-                           SELECT 1 FROM {dst_schema}.workspace_scope_binding d
-                           WHERE d.workspace_id = s.workspace_id
-                       )"
-                ),
+                &sql_templates::render_pg_missing_workspaces_sql(src_schema, dst_schema),
                 &[],
             )
             .await?
@@ -295,9 +278,7 @@ pub async fn migrate_postgres_metadata(
 
     let workspaces_after: i64 = client
         .query_one(
-            &format!(
-                "SELECT COUNT(*) FROM {dst_schema}.workspace_scope_binding WHERE workspace_id <> '__self_monitoring__'"
-            ),
+            &sql_templates::render_pg_workspace_count_sql(dst_schema),
             &[],
         )
         .await?
@@ -322,7 +303,10 @@ pub async fn migrate_postgres_metadata(
         }
         if dry_run {
             let count: i64 = client
-                .query_one(&format!("SELECT COUNT(*) FROM {src_schema}.{table}"), &[])
+                .query_one(
+                    &sql_templates::render_table_count_sql(src_schema, table),
+                    &[],
+                )
                 .await?
                 .get(0);
             operational_tables_copied.push(((*table).to_string(), count.max(0) as u64));
@@ -342,11 +326,12 @@ pub async fn migrate_postgres_metadata(
             })
             .collect::<Vec<_>>()
             .join(", ");
-        let sql = format!(
-            "INSERT INTO {dst_schema}.{table} ({insert_list})
-             SELECT {select_list}
-             FROM {src_schema}.{table}
-             ON CONFLICT DO NOTHING"
+        let sql = sql_templates::render_pg_copy_table_sql(
+            src_schema,
+            dst_schema,
+            table,
+            &insert_list,
+            &select_list,
         );
         let inserted = if uses_scope_id {
             client.execute(&sql, &[&dst_physical_scope_id]).await?
@@ -364,7 +349,10 @@ pub async fn migrate_postgres_metadata(
     })
 }
 
-fn describe_duckdb_table(conn: &Connection, qualified: &str) -> Result<Option<Vec<(String, String)>>> {
+fn describe_duckdb_table(
+    conn: &Connection,
+    qualified: &str,
+) -> Result<Option<Vec<(String, String)>>> {
     let mut stmt = match conn.prepare(&format!("DESCRIBE {qualified}")) {
         Ok(stmt) => stmt,
         Err(_) => return Ok(None),
@@ -393,9 +381,8 @@ pub fn migrate_ducklake_tables(
 
     let conn = Connection::open_in_memory().context("open DuckDB for migration")?;
     let ext_path = Path::new(&config.ducklake.extension_path);
-    conn.execute_batch(&format!(
-        "LOAD '{}'; SET memory_limit = '2GB'; SET threads = 2;",
-        escape_sql_literal(&ext_path.to_string_lossy())
+    conn.execute_batch(&sql_templates::render_ducklake_init_sql(
+        &escape_sql_literal(&ext_path.to_string_lossy()),
     ))
     .context("load ducklake extension")?;
     configure_object_store(&conn, config, src_data_path).context("configure src object store")?;
@@ -404,16 +391,14 @@ pub fn migrate_ducklake_tables(
             .context("configure dst object store")?;
     }
 
-    let escaped_dsn = escape_sql_literal(pg_dsn);
-    conn.execute_batch(&format!(
-        "ATTACH 'ducklake:postgres:{escaped_dsn}' AS src_lake (METADATA_SCHEMA '{}', DATA_PATH '{}', READ_ONLY);
-         ATTACH 'ducklake:postgres:{escaped_dsn}' AS dst_lake (METADATA_SCHEMA '{}', DATA_PATH '{}');",
-        escape_sql_literal(src_schema),
-        escape_sql_literal(src_data_path),
-        escape_sql_literal(dst_schema),
-        escape_sql_literal(dst_data_path),
+    conn.execute_batch(&sql_templates::render_ducklake_attach_sql(
+        &escape_sql_literal(pg_dsn),
+        &escape_sql_literal(src_schema),
+        &escape_sql_literal(src_data_path),
+        &escape_sql_literal(dst_schema),
+        &escape_sql_literal(dst_data_path),
     ))
-    .context("attach src_lake and dst_lake")?;
+    .context("open src_lake and dst_lake")?;
 
     let mut reports = Vec::new();
     for table in TELEMETRY_TABLES {
@@ -424,14 +409,16 @@ pub fn migrate_ducklake_tables(
             bail!("destination table dst_lake.{table} does not exist");
         };
 
-        let src_rows: i64 =
-            conn.query_row(&format!("SELECT COUNT(*) FROM src_lake.{table}"), [], |r| {
-                r.get(0)
-            })?;
-        let dst_rows_before: i64 =
-            conn.query_row(&format!("SELECT COUNT(*) FROM dst_lake.{table}"), [], |r| {
-                r.get(0)
-            })?;
+        let src_rows: i64 = conn.query_row(
+            &sql_templates::render_table_count_sql("src_lake", table),
+            [],
+            |r| r.get(0),
+        )?;
+        let dst_rows_before: i64 = conn.query_row(
+            &sql_templates::render_table_count_sql("dst_lake", table),
+            [],
+            |r| r.get(0),
+        )?;
 
         if dry_run || src_rows == 0 {
             reports.push(TableMigrationReport {
@@ -451,12 +438,8 @@ pub fn migrate_ducklake_tables(
             .iter()
             .any(|(name, _)| name.eq_ignore_ascii_case("timestamp"));
         if has_timestamp && src_rows > 50_000 {
-            let mut day_stmt = conn.prepare(&format!(
-                "SELECT DISTINCT strftime(timestamp, '%Y-%m-%d') AS day
-                 FROM src_lake.{table}
-                 WHERE timestamp IS NOT NULL
-                 ORDER BY day"
-            ))?;
+            let mut day_stmt =
+                conn.prepare(&sql_templates::render_ducklake_distinct_days_sql(table))?;
             let mut day_rows = day_stmt.query([])?;
             let mut days = Vec::new();
             while let Some(row) = day_rows.next()? {
@@ -467,51 +450,39 @@ pub fn migrate_ducklake_tables(
             for day in days {
                 let day_start = format!("{day}T00:00:00Z");
                 let dst_day_count: i64 = conn.query_row(
-                    &format!(
-                        "SELECT COUNT(*) FROM dst_lake.{table}
-                         WHERE timestamp >= '{day_start}'::TIMESTAMPTZ::TIMESTAMP_NS
-                           AND timestamp < ('{day_start}'::TIMESTAMPTZ + INTERVAL '1 day')::TIMESTAMP_NS"
-                    ),
+                    &sql_templates::render_ducklake_day_count_sql(table, &day_start),
                     [],
                     |r| r.get(0),
                 )?;
-                let dedup_clause = if *table == "traces" && dst_day_count > 0 {
-                    " AND NOT EXISTS (
-                        SELECT 1 FROM dst_lake.traces d
-                        WHERE d.trace_id = s.trace_id
-                          AND d.span_id = s.span_id
-                          AND d.timestamp = s.timestamp
-                    )"
-                } else if dst_day_count > 0 {
-                    // Non-traces large tables with existing rows in this day: skip already migrated day.
+                let dedup_traces = *table == "traces" && dst_day_count > 0;
+                if *table != "traces" && dst_day_count > 0 {
                     continue;
-                } else {
-                    ""
-                };
+                }
 
                 info!(table = %table, day = %day, dst_day_count, "Migrating DuckLake day partition");
-                conn.execute_batch(&format!(
-                    "INSERT INTO dst_lake.{table} ({insert_cols_sql})
-                     SELECT {select_exprs_sql}
-                     FROM src_lake.{table} s
-                     WHERE s.timestamp >= '{day_start}'::TIMESTAMPTZ::TIMESTAMP_NS
-                       AND s.timestamp < ('{day_start}'::TIMESTAMPTZ + INTERVAL '1 day')::TIMESTAMP_NS{dedup_clause};"
+                conn.execute_batch(&sql_templates::render_ducklake_insert_day_sql(
+                    table,
+                    &insert_cols_sql,
+                    &select_exprs_sql,
+                    &day_start,
+                    dedup_traces,
                 ))
                 .with_context(|| format!("migrate {table} for day {day}"))?;
             }
         } else if dst_rows_before == 0 {
-            conn.execute_batch(&format!(
-                "INSERT INTO dst_lake.{table} ({insert_cols_sql})
-                 SELECT {select_exprs_sql}
-                 FROM src_lake.{table};"
+            conn.execute_batch(&sql_templates::render_ducklake_insert_all_sql(
+                table,
+                &insert_cols_sql,
+                &select_exprs_sql,
             ))
             .with_context(|| format!("migrate {table}"))?;
         }
 
-        let dst_rows_after: i64 =
-            conn.query_row(&format!("SELECT COUNT(*) FROM dst_lake.{table}"), [], |r| {
-                r.get(0)
-            })?;
+        let dst_rows_after: i64 = conn.query_row(
+            &sql_templates::render_table_count_sql("dst_lake", table),
+            [],
+            |r| r.get(0),
+        )?;
         if dst_rows_after < src_rows {
             bail!(
                 "migration incomplete for {table}: dst_rows_after ({dst_rows_after}) < src_rows ({src_rows})"
@@ -537,7 +508,10 @@ mod tests {
     fn build_column_projection_casts_map_columns_to_variant() {
         let src = vec![
             ("trace_id".to_string(), "VARCHAR".to_string()),
-            ("attributes".to_string(), "MAP(VARCHAR, VARCHAR)".to_string()),
+            (
+                "attributes".to_string(),
+                "MAP(VARCHAR, VARCHAR)".to_string(),
+            ),
             (
                 "resource_attributes".to_string(),
                 "MAP(VARCHAR, VARCHAR)".to_string(),
@@ -590,12 +564,8 @@ mod tests {
         )
         .expect("seed tables");
 
-        let src_cols = describe_duckdb_table(&conn, "src_traces")
-            .unwrap()
-            .unwrap();
-        let dst_cols = describe_duckdb_table(&conn, "dst_traces")
-            .unwrap()
-            .unwrap();
+        let src_cols = describe_duckdb_table(&conn, "src_traces").unwrap().unwrap();
+        let dst_cols = describe_duckdb_table(&conn, "dst_traces").unwrap().unwrap();
         let (insert_cols, select_exprs) =
             build_column_projection("traces", &src_cols, &dst_cols).expect("projection");
 
