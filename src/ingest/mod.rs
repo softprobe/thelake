@@ -4,11 +4,14 @@
 //! worker (`flush_interval_seconds` / eager depth). Enqueue never writes the lake.
 
 mod coalesce;
+pub mod post_commit;
+
+pub use post_commit::{CommitWrite, PostCommitHooks, SpanCommitHook};
 
 use crate::catalog_sessions::CatalogSessions;
 use crate::config::{resolve_write_timeout_seconds, Config};
 use crate::models::{Log, Score, ScoreConfig, Span};
-use crate::session_summary::{DirtyHint, SessionSummaryDirty};
+use crate::session_summary::SessionSummaryDirty;
 use crate::storage::ducklake::{CatalogPool, DuckLakeWriter};
 use crate::workspace::DuckLakeScopeResolver;
 use crate::workspace_scope::{WorkspaceBinding, WorkspaceScopeMode, DEFAULT_WORKSPACE_ID};
@@ -55,8 +58,8 @@ impl IngestEngine {
     ) -> Result<Arc<Self>> {
         let workspace_id = binding.workspace_id.clone();
         let writer = Arc::new(DuckLakeWriter::new(binding, pool)?);
-        let dirty =
-            session_summary_dirty_for(config, &resolver, &workspace_id, writer.metadata_schema());
+        let post_commit =
+            post_commit_hooks_for(config, &resolver, &workspace_id, writer.metadata_schema());
         Ok(Arc::new(Self::from_writer(
             writer,
             resolver,
@@ -64,7 +67,7 @@ impl IngestEngine {
             config.ingest.flush_interval_seconds,
             config.ingest.buffer_size_mb,
             config.ingest.write_timeout_seconds,
-            dirty,
+            post_commit,
         )))
     }
 
@@ -91,7 +94,7 @@ impl IngestEngine {
         flush_interval_seconds: u64,
         buffer_size_mb: u64,
         write_timeout_seconds: u64,
-        session_summary_dirty: Option<Arc<SessionSummaryDirty>>,
+        post_commit: PostCommitHooks,
     ) -> Self {
         let workspace_id = workspace_id.into();
         let (max_pending, eager_pending) = coalesce::resolve_byte_limits(buffer_size_mb);
@@ -137,7 +140,6 @@ impl IngestEngine {
             let writer = writer.clone();
             let resolver = resolver.clone();
             let tenant = workspace_id.clone();
-            let dirty = session_summary_dirty;
             CoalesceBuf::with_limits(
                 flush_interval_seconds,
                 max_pending,
@@ -146,19 +148,11 @@ impl IngestEngine {
                     let w = writer.clone();
                     let resolver = resolver.clone();
                     let tenant = tenant.clone();
-                    let dirty = dirty.clone();
+                    let post_commit = post_commit.clone();
                     Box::pin(async move {
                         let rows: u64 = batches.iter().map(|b| b.len() as u64).sum();
-                        // Fold before the storage commit because the commit consumes batches.
-                        let hints = match dirty.as_deref() {
-                            Some(dirty_writer) => crate::session_summary::fold_dirty_hints(
-                                batches
-                                    .iter()
-                                    .flatten()
-                                    .filter(|span| dirty_writer.allow_span(span)),
-                            ),
-                            None => Vec::new(),
-                        };
+                        // Prepare before the storage commit because the commit consumes batches.
+                        let pending_writes = post_commit.prepare(&batches);
                         let manifests = resolver
                             .load_active_telemetry_columns_manifests_for_scope(w.metadata_schema())
                             .await?;
@@ -174,8 +168,7 @@ impl IngestEngine {
                             rows,
                             true,
                             commit_started.elapsed(),
-                            &hints,
-                            dirty.as_deref(),
+                            pending_writes,
                         )
                         .await;
                         r
@@ -280,37 +273,60 @@ pub(crate) async fn maybe_after_traces_commit(
     rows: u64,
     coalesced: bool,
     commit_elapsed: std::time::Duration,
-    hints: &[DirtyHint],
-    dirty: Option<&SessionSummaryDirty>,
+    pending_writes: Vec<CommitWrite>,
 ) {
     if !write_ok {
         return;
     }
     crate::self_monitoring::record_ingest_commit(tenant, "traces", rows, coalesced, commit_elapsed);
-    if let Some(dirty) = dirty {
-        dirty.apply_hints(hints).await;
-    }
+    PostCommitHooks::apply_all(pending_writes).await;
 }
 
 #[cfg(test)]
 mod after_commit_tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[tokio::test]
     async fn maybe_after_traces_commit_skips_when_write_failed() {
-        maybe_after_traces_commit(false, "t", 1, true, std::time::Duration::ZERO, &[], None).await;
+        let ran = Arc::new(AtomicUsize::new(0));
+        let r = ran.clone();
+        let write: CommitWrite = Box::pin(async move {
+            r.fetch_add(1, Ordering::SeqCst);
+        });
+        maybe_after_traces_commit(false, "t", 1, true, std::time::Duration::ZERO, vec![write])
+            .await;
+        assert_eq!(ran.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]
-    async fn maybe_after_traces_commit_ok_without_dirty() {
+    async fn maybe_after_traces_commit_runs_writes_when_ok() {
+        let ran = Arc::new(AtomicUsize::new(0));
+        let r = ran.clone();
+        let write: CommitWrite = Box::pin(async move {
+            r.fetch_add(1, Ordering::SeqCst);
+        });
         maybe_after_traces_commit(
             true,
             "t",
             1,
             true,
             std::time::Duration::from_millis(1),
-            &[],
-            None,
+            vec![write],
+        )
+        .await;
+        assert_eq!(ran.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn maybe_after_traces_commit_ok_without_writes() {
+        maybe_after_traces_commit(
+            true,
+            "t",
+            1,
+            true,
+            std::time::Duration::from_millis(1),
+            Vec::new(),
         )
         .await;
     }
@@ -329,13 +345,13 @@ mod after_commit_tests {
     }
 }
 
-/// Build the durable dirty handle for one tenant's session_summary queue.
-pub(crate) fn session_summary_dirty_for(
+/// Build the post-commit read-model hooks for one tenant's traces writer.
+pub(crate) fn post_commit_hooks_for(
     config: &Config,
     resolver: &DuckLakeScopeResolver,
     workspace_id: &str,
     metadata_schema: &str,
-) -> Option<Arc<SessionSummaryDirty>> {
+) -> PostCommitHooks {
     let dirty = if config.ducklake.workspace_scope_mode == WorkspaceScopeMode::Shared {
         SessionSummaryDirty::new_for_workspace(
             resolver.pool().clone(),
@@ -345,7 +361,12 @@ pub(crate) fn session_summary_dirty_for(
     } else {
         SessionSummaryDirty::new(resolver.pool().clone(), metadata_schema, workspace_id)
     };
-    Some(Arc::new(dirty))
+    let tag_index = crate::tag_index::TagIndexWriter::new(
+        resolver.pool().clone(),
+        metadata_schema,
+        workspace_id,
+    );
+    PostCommitHooks::new(vec![Arc::new(dirty), Arc::new(tag_index)])
 }
 
 #[cfg(test)]

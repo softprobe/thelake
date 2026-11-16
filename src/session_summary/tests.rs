@@ -2,7 +2,7 @@
 //! Run via `make test-lease-pg` / `make test-e2e` (`cargo test --lib postgres_ -- --ignored`).
 
 use super::*;
-use crate::ingest::maybe_after_traces_commit;
+use crate::ingest::{maybe_after_traces_commit, PostCommitHooks};
 use crate::session_summary::reduce::{
     ack_dirty, claim_dirty, dirty_depth, publish_claimed_summary_rows, upsert_summary_rows,
     upsert_summary_rows_on, SummaryRow,
@@ -10,6 +10,7 @@ use crate::session_summary::reduce::{
 use crate::session_summary::test_span::span_at;
 use chrono::{TimeZone, Utc};
 use deadpool_postgres::{Manager, ManagerConfig, Pool, RecyclingMethod};
+use std::sync::Arc;
 use std::time::Duration;
 use tokio_postgres::NoTls;
 
@@ -247,15 +248,15 @@ async fn postgres_maybe_after_traces_commit_write_err_skips_dirty() {
         .await
         .expect("ducklake-postgres required (make setup)");
     let dirty = SessionSummaryDirty::new(pool.clone(), schema, "t1");
-    let hints = fold_dirty_hints(&[span_at("s1", 1)]);
+    let hooks = PostCommitHooks::new(vec![Arc::new(dirty)]);
+    let batch = vec![vec![span_at("s1", 1)]];
     maybe_after_traces_commit(
         false,
         "t1",
         1,
         true,
         std::time::Duration::ZERO,
-        &hints,
-        Some(&dirty),
+        hooks.prepare(&batch),
     )
     .await;
     let client = pool.get().await.expect("client");
@@ -276,8 +277,7 @@ async fn postgres_maybe_after_traces_commit_write_err_skips_dirty() {
         1,
         true,
         std::time::Duration::from_millis(1),
-        &hints,
-        Some(&dirty),
+        hooks.prepare(&batch),
     )
     .await;
     let n2: i64 = client

@@ -81,6 +81,14 @@ impl WorkspaceContext {
         &self.admin
     }
 
+    pub(crate) fn tag_index_reader(&self) -> crate::tag_index::TagIndexReader {
+        crate::tag_index::TagIndexReader::new(
+            self.catalog_pool.clone(),
+            self.physical.pg_namespace(),
+            &self.workspace_id,
+        )
+    }
+
     fn session_summary_scope(&self) -> WorkspaceSummaryScope {
         WorkspaceSummaryScope {
             pool: self.catalog_pool.clone(),
@@ -426,7 +434,7 @@ impl WorkspaceManager {
         // Keep its cleanup in the same operation and make retries harmless.
         let mut client = self.scope_registry.pool.get().await?;
         let transaction = client.transaction().await?;
-        for table in ["session_summary", "session_summary_dirty"] {
+        for table in ["session_summary", "session_summary_dirty", "tag_index"] {
             let delete_sql = crate::sql::maintenance::workspace_purge::workspace_summary_delete_sql(
                 scope.pg_namespace(),
                 table,
@@ -810,6 +818,9 @@ RETURNING physical_scope_id;"#,
                 .await
                 .context("failed to initialize session summary tables")?;
         }
+        crate::tag_index::ensure_tag_index_table(&client, scope.pg_namespace())
+            .await
+            .context("failed to initialize tag_index table")?;
         drop(client);
         // Product-hot activation belongs to scope initialization so summary
         // jobs remain correct even when periodic maintenance is disabled.
