@@ -250,16 +250,55 @@ jobs:
           test "${app_image}" = "softprobe/thelake:${IMAGE_TAG}"
           test "${collector_image}" = "softprobe/thelake-collector:${IMAGE_TAG}"
 
-  staging-e2e:
+  wait-for-blackbox-e2e:
+    name: Wait for canonical Blackbox staging E2E
     needs: deploy
     if: needs.deploy.outputs.deployed == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 180
+    env:
+      GH_TOKEN: ${{ secrets.GH_PAT }}
     steps:
-      - name: Check out the deployed TheLake source
-        uses: actions/checkout@v5
-        with:
-          ref: ${{ needs.deploy.outputs.source_sha }}
-
-      - name: Verify staging trace persistence
-        run: make test-staging-e2e
+      - name: Dispatch and wait for the canonical Blackbox staging E2E
+        run: |
+          set -euo pipefail
+          dispatch=$(jq -n '{ref:"main",inputs:{target:"staging"}}' | \
+            gh api --method POST \
+              repos/softprobe/dev/actions/workflows/blackbox-e2e.yml/dispatches \
+              --input -)
+          run_id=$(jq -er '.workflow_run_id' <<<"${dispatch}")
+          run_url=$(jq -er '.html_url' <<<"${dispatch}")
+          echo "Blackbox staging E2E run: ${run_url}"
+          deadline=$((SECONDS + 10500))
+          last_status=""
+          while true; do
+            api_attempt=0
+            until run=$(gh api "repos/softprobe/dev/actions/runs/${run_id}"); do
+              api_attempt=$((api_attempt + 1))
+              if (( api_attempt >= 3 )); then
+                echo "::error::Could not read Blackbox staging E2E status: ${run_url}"
+                exit 1
+              fi
+              echo "Could not read Blackbox staging E2E status; retrying (${api_attempt}/3)."
+              sleep 10
+            done
+            status=$(jq -er '.status' <<<"${run}")
+            conclusion=$(jq -r '.conclusion // ""' <<<"${run}")
+            if [[ "${status}" != "${last_status}" ]]; then
+              echo "Blackbox staging E2E status: ${status}"
+              last_status="${status}"
+            fi
+            if [[ "${status}" == completed ]]; then
+              if [[ "${conclusion}" == success ]]; then
+                echo "Blackbox staging E2E passed."
+                exit 0
+              fi
+              echo "::error::Blackbox staging E2E concluded ${conclusion}: ${run_url}"
+              exit 1
+            fi
+            if (( SECONDS >= deadline )); then
+              echo "::error::Timed out waiting for Blackbox staging E2E: ${run_url}"
+              exit 1
+            fi
+            sleep 30
+          done

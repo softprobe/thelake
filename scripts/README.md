@@ -9,7 +9,6 @@ provide explicit operator utilities.
 |---|---|---|
 | Build | `download-ducklake-extension.sh`, `assert-duckdb-version.sh` | `build-release`, `test`, `test-e2e`, `test-perf` |
 | Test orchestration | `run-e2e-matrix.sh`, `run-isolated-cargo-tests.sh` | `test-e2e`, `test-perf` |
-| Staging E2E | `staging_e2e.py`, `test_staging_e2e.py` | `test-staging-e2e`, `test-staging-e2e-contract` |
 | Compatibility | `compat/*.sh`, `compat/run-with-timeout` | `test-compat`, `test-grafana-static`, `test-grafana-system`, `test-loki-diff`, `test-tempo-diff` |
 | Grafana | `grafana-system-smoke.sh`, `grafana-manual-up.sh`, `grafana-manual-down.sh`, `test-grafana-browser.sh` | `test-grafana-system`, `grafana-up`, `grafana-down`, `test-grafana-browser` |
 | Performance | `bench-demo-cpu-full.sh`, `bench-llm-seeded.sh`, `perf/*.py` | `bench-demo-cpu-full`, `bench-llm-seeded`, `test-perf-helpers` |
