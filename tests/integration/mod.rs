@@ -47,3 +47,5 @@ pub mod integration;
 pub mod session_summary_list;
 #[cfg(feature = "integration-e2e")]
 pub mod storage_contract_validation;
+#[cfg(feature = "integration-e2e")]
+pub mod variant_benchmark;
