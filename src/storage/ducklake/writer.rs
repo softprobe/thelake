@@ -190,13 +190,14 @@ impl DuckLakeWriter {
         custom_schema: Option<&Arc<Schema>>,
     ) -> Result<()> {
         let qualified_table = ducklake_qualified_table_name(scope, table_name);
-        let ddl = base_table_ddl(table_name)
+        let base_ddl = base_table_ddl(table_name)
             .ok_or_else(|| anyhow!("unsupported table for DuckLake ensure: {table_name}"))?
             .replacen(
                 &format!("CREATE TABLE IF NOT EXISTS {table_name}"),
                 &format!("CREATE TABLE IF NOT EXISTS {qualified_table}"),
                 1,
             );
+        let ddl = super::layout::otlp_create_table_ddl(conn, &base_ddl, table_name)?;
         conn.execute_batch(&ddl)
             .map_err(|error| anyhow!("DuckLake base DDL failed for {qualified_table}: {error}"))?;
 
@@ -218,7 +219,14 @@ impl DuckLakeWriter {
                         field.name()
                     )
                 })?;
-            let expected = Self::arrow_field_to_duck_add_type(field)?;
+            let expected = if crate::storage::schema::attribute_map::is_variant_column(
+                table_name,
+                field.name(),
+            ) {
+                "VARIANT"
+            } else {
+                Self::arrow_field_to_duck_add_type(field)?
+            };
             if normalize_duck_type(actual) != normalize_duck_type(expected) {
                 return Err(anyhow!(
                     "base column {} on {qualified_table} has type {actual}, expected {expected}; clean cutover is required",
@@ -245,7 +253,14 @@ impl DuckLakeWriter {
             for field in schema.fields() {
                 if let Some(actual) = found.get(&field.name().to_ascii_lowercase()) {
                     if !base_names.contains(&field.name().to_ascii_lowercase()) {
-                        let expected = Self::arrow_field_to_duck_add_type(field)?;
+                        let expected = if crate::storage::schema::attribute_map::is_variant_column(
+                            table_name,
+                            field.name(),
+                        ) {
+                            "VARIANT"
+                        } else {
+                            Self::arrow_field_to_duck_add_type(field)?
+                        };
                         if normalize_duck_type(actual) != normalize_duck_type(expected) {
                             return Err(anyhow!(
                                 "promoted column {} on {qualified_table} has type {actual}, expected {expected}",
@@ -276,7 +291,7 @@ impl DuckLakeWriter {
 
         if is_otlp_table(table_name) {
             ensure_otlp_table_partition_sort(conn, &qualified_table)?;
-            super::layout::apply_otlp_layout_profile(conn, scope, table_name)?;
+            super::layout::apply_otlp_writer_session(conn, table_name)?;
         }
         Ok(())
     }

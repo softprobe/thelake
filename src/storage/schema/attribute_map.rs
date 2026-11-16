@@ -1,25 +1,9 @@
-//! Helpers for telemetry attributes stored in DuckLake MAP columns.
+//! Helpers for telemetry attributes stored in DuckLake VARIANT columns.
 
-use serde_json::{Map as JsonMap, Number, Value};
+use serde_json::{Map as JsonMap, Value};
 use std::collections::HashMap;
 
-/// Attribute keys encoded as JSON integers for stable typed encoding (metrics labels).
-pub const ATTRIBUTE_MAP_INT64_KEYS: &[&str] = &[
-    "gen_ai.usage.input_tokens",
-    "gen_ai.usage.output_tokens",
-    "gen_ai.usage.total_tokens",
-];
-
-/// Attribute keys encoded as JSON floats for stable typed encoding (metrics labels).
-pub const ATTRIBUTE_MAP_FLOAT64_KEYS: &[&str] = &["sp.cost.total"];
-
-#[deprecated(note = "use ATTRIBUTE_MAP_INT64_KEYS")]
-pub const VARIANT_INT64_KEYS: &[&str] = ATTRIBUTE_MAP_INT64_KEYS;
-
-#[deprecated(note = "use ATTRIBUTE_MAP_FLOAT64_KEYS")]
-pub const VARIANT_FLOAT64_KEYS: &[&str] = ATTRIBUTE_MAP_FLOAT64_KEYS;
-
-/// Telemetry columns stored as DuckLake `MAP(VARCHAR, VARCHAR)`.
+/// Telemetry columns stored as DuckLake `VARIANT`.
 pub fn hot_map_columns(table_name: &str) -> &'static [&'static str] {
     match table_name {
         "traces" => &[
@@ -33,10 +17,17 @@ pub fn hot_map_columns(table_name: &str) -> &'static [&'static str] {
     }
 }
 
-/// Deprecated alias for [`hot_map_columns`].
-#[deprecated(note = "renamed to hot_map_columns")]
-pub fn hot_variant_columns(table_name: &str) -> &'static [&'static str] {
-    hot_map_columns(table_name)
+/// Whether `table_name.column_name` is stored as DuckLake `VARIANT`.
+pub fn is_variant_column(table_name: &str, column_name: &str) -> bool {
+    match table_name {
+        "traces" => matches!(
+            column_name,
+            "attributes" | "resource_attributes" | "instrumentation_scope" | "links" | "events"
+        ),
+        "logs" => matches!(column_name, "attributes" | "resource_attributes"),
+        "scores" | "score_configs" => column_name == "metadata",
+        _ => false,
+    }
 }
 
 /// Escape a SQL string literal (single quotes only).
@@ -44,7 +35,7 @@ pub fn escape_sql_string(value: &str) -> String {
     value.replace('\'', "''")
 }
 
-/// MAP object field as VARCHAR (required for COALESCE / string filters).
+/// VARIANT object field as VARCHAR (required for COALESCE / string filters).
 pub fn attribute_map_varchar(column: &str, key: &str) -> String {
     format!(
         "CAST({column}['{key}'] AS VARCHAR)",
@@ -53,12 +44,7 @@ pub fn attribute_map_varchar(column: &str, key: &str) -> String {
     )
 }
 
-#[deprecated(note = "use attribute_map_varchar")]
-pub fn variant_varchar(column: &str, key: &str) -> String {
-    attribute_map_varchar(column, key)
-}
-
-/// `try_cast` of a MAP object field to a DuckDB type.
+/// `try_cast` of a VARIANT object field to a DuckDB type.
 pub fn attribute_map_try_cast(column: &str, key: &str, duck_type: &str) -> String {
     format!(
         "try_cast({column}['{key}'] AS {duck_type})",
@@ -66,11 +52,6 @@ pub fn attribute_map_try_cast(column: &str, key: &str, duck_type: &str) -> Strin
         key = escape_sql_string(key),
         duck_type = duck_type
     )
-}
-
-#[deprecated(note = "use attribute_map_try_cast")]
-pub fn variant_try_cast(column: &str, key: &str, duck_type: &str) -> String {
-    attribute_map_try_cast(column, key, duck_type)
 }
 
 /// Prefer a promoted column when present; otherwise read from the attribute bag.
@@ -100,14 +81,9 @@ pub fn prefer_attr_try_cast(
     }
 }
 
-/// Project an attribute-map column as JSON for API serialization.
+/// Project a VARIANT column as JSON for API serialization.
 pub fn attribute_map_as_json(column: &str) -> String {
     format!("CAST({column} AS JSON) AS {column}")
-}
-
-#[deprecated(note = "use attribute_map_as_json")]
-pub fn variant_as_json(column: &str) -> String {
-    attribute_map_as_json(column)
 }
 
 /// DuckDB returns `CAST(... AS JSON)` as text; parse to object/array when possible.
@@ -120,33 +96,6 @@ pub fn parse_projected_json_value(value: Value) -> Value {
             Ok(parsed @ (Value::Object(_) | Value::Array(_))) => parsed,
             _ => Value::String(text),
         },
-        other => other,
-    }
-}
-
-/// Rehydrate nested JSON-text values inside a projected MAP object.
-///
-/// `MAP(VARCHAR, VARCHAR)` cannot store typed nested values; after
-/// `CAST(map AS JSON)` nested OTel payloads appear as JSON strings. Walk the
-/// object and parse stringified arrays/objects (and `sp.json:` prefixed forms).
-pub fn rehydrate_map_json_values(value: Value) -> Value {
-    let top = parse_projected_json_value(value);
-    match top {
-        Value::Object(map) => {
-            let mut out = JsonMap::new();
-            for (k, v) in map {
-                out.insert(k, rehydrate_map_json_values(v));
-            }
-            Value::Object(out)
-        }
-        Value::String(text) => {
-            let payload = crate::models::strip_nested_json_prefix(&text).unwrap_or(text.as_str());
-            match serde_json::from_str::<Value>(payload) {
-                Ok(parsed @ (Value::Object(_) | Value::Array(_))) => parsed,
-                Ok(other) if crate::models::strip_nested_json_prefix(&text).is_some() => other,
-                _ => Value::String(text),
-            }
-        }
         other => other,
     }
 }
@@ -175,52 +124,37 @@ pub fn attribute_map_json_to_string_map(value: &Value) -> HashMap<String, String
         .collect()
 }
 
-#[deprecated(note = "use attribute_map_json_to_string_map")]
-pub fn variant_json_to_string_map(value: &Value) -> HashMap<String, String> {
-    attribute_map_json_to_string_map(value)
-}
-
-/// DuckLake projection for Parquet ingest.
+/// DuckLake projection for Parquet ingest into `VARIANT` columns.
 pub fn parquet_select_for_table(table_name: &str) -> String {
-    if table_name == "traces" {
-        // Arrow stages nested events as JSON text; store them as one DuckDB
-        // JSON value so inline scans do not materialize nested temporal/MAP vectors.
-        "SELECT * REPLACE (CAST(events AS JSON) AS events)".to_string()
-    } else {
-        "SELECT *".to_string()
+    match table_name {
+        "traces" => "SELECT * REPLACE (\
+            TRY_CAST(attributes AS JSON)::VARIANT AS attributes, \
+            TRY_CAST(resource_attributes AS JSON)::VARIANT AS resource_attributes, \
+            TRY_CAST(instrumentation_scope AS JSON)::VARIANT AS instrumentation_scope, \
+            TRY_CAST(links AS JSON)::VARIANT AS links, \
+            TRY_CAST(events AS JSON)::VARIANT AS events)"
+            .to_string(),
+        "logs" => "SELECT * REPLACE (\
+            TRY_CAST(attributes AS JSON)::VARIANT AS attributes, \
+            TRY_CAST(resource_attributes AS JSON)::VARIANT AS resource_attributes)"
+            .to_string(),
+        "scores" | "score_configs" => {
+            "SELECT * REPLACE (TRY_CAST(metadata AS JSON)::VARIANT AS metadata)".to_string()
+        }
+        _ => "SELECT *".to_string(),
     }
 }
 
-/// Deprecated alias for [`parquet_select_for_table`].
-#[deprecated(note = "renamed to parquet_select_for_table")]
-pub fn parquet_select_with_variant_casts(table_name: &str) -> String {
-    parquet_select_for_table(table_name)
-}
-
-/// Encode a string map as JSON, applying stable types to selected hot keys.
+/// Encode a string map as JSON for `VARIANT` staging.
 pub fn encode_attributes_json(map: &HashMap<String, String>) -> String {
     let mut obj = JsonMap::new();
     for (key, value) in map {
-        obj.insert(key.clone(), typed_json_value(key, value));
+        obj.insert(key.clone(), typed_json_value(value));
     }
     Value::Object(obj).to_string()
 }
 
-fn typed_json_value(key: &str, value: &str) -> Value {
-    if ATTRIBUTE_MAP_INT64_KEYS.contains(&key) {
-        if let Ok(n) = value.parse::<i64>() {
-            return Value::Number(Number::from(n));
-        }
-    }
-    if ATTRIBUTE_MAP_FLOAT64_KEYS.contains(&key) {
-        if let Ok(n) = value.parse::<f64>() {
-            if let Some(num) = Number::from_f64(n) {
-                return Value::Number(num);
-            }
-        }
-    }
-    // Only rehydrate values explicitly tagged by any_value encoding (arrays/kvlists).
-    // Plain OTLP StringValues that look like JSON stay strings.
+fn typed_json_value(value: &str) -> Value {
     if let Some(payload) = crate::models::strip_nested_json_prefix(value) {
         match serde_json::from_str::<Value>(payload) {
             Ok(parsed @ (Value::Object(_) | Value::Array(_))) => return parsed,
@@ -236,21 +170,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn encodes_hot_keys_with_stable_json_types() {
-        let mut map = HashMap::new();
-        map.insert("sp.observation.type".into(), "generation".into());
-        map.insert("gen_ai.usage.input_tokens".into(), "42".into());
-        map.insert("sp.cost.total".into(), "1.5".into());
-        map.insert("sp.user.id".into(), "u1".into());
-
-        let json: Value = serde_json::from_str(&encode_attributes_json(&map)).unwrap();
-        assert_eq!(json["sp.observation.type"], "generation");
-        assert_eq!(json["gen_ai.usage.input_tokens"], 42);
-        assert_eq!(json["sp.cost.total"], 1.5);
-        assert_eq!(json["sp.user.id"], "u1");
-    }
-
-    #[test]
     fn attribute_map_sql_helpers_cast_nested_fields() {
         assert_eq!(
             attribute_map_varchar("attributes", "sp.user.id"),
@@ -260,12 +179,15 @@ mod tests {
             attribute_map_try_cast("attributes", "gen_ai.usage.input_tokens", "BIGINT"),
             "try_cast(attributes['gen_ai.usage.input_tokens'] AS BIGINT)"
         );
-        assert_eq!(
-            parquet_select_for_table("traces"),
-            "SELECT * REPLACE (CAST(events AS JSON) AS events)"
+        assert!(
+            parquet_select_for_table("traces").contains("TRY_CAST(attributes AS JSON)::VARIANT")
         );
-        assert_eq!(parquet_select_for_table("logs"), "SELECT *");
-        assert_eq!(parquet_select_for_table("scores"), "SELECT *");
+        assert!(parquet_select_for_table("traces").contains("TRY_CAST(events AS JSON)::VARIANT"));
+        assert!(parquet_select_for_table("logs").contains("TRY_CAST(attributes AS JSON)::VARIANT"));
+        assert_eq!(
+            parquet_select_for_table("scores"),
+            "SELECT * REPLACE (TRY_CAST(metadata AS JSON)::VARIANT AS metadata)"
+        );
     }
 
     #[test]

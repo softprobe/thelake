@@ -23,5 +23,6 @@ CALL ducklake_rewrite_data_files(
   {{catalog}},
   {{table}},
   schema => {{schema}},
-  delete_threshold => 0
+  delete_threshold => 0,
+  max_compacted_files => 64
 );

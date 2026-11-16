@@ -1,12 +1,12 @@
 WITH span_attr_keys AS (
     SELECT
-        UNNEST(map_keys(attributes)) AS key,
-        (service_name IS NULL OR attributes['service_name'] IS DISTINCT FROM service_name) AS keep_service_name
+        UNNEST(json_keys(CAST(attributes AS JSON))) AS key,
+        (service_name IS NULL OR CAST(attributes['service_name'] AS VARCHAR) IS DISTINCT FROM service_name) AS keep_service_name
     FROM traces
     WHERE {{timestamp_filter}}
 ),
 resource_attr_keys AS (
-    SELECT UNNEST(map_keys(resource_attributes)) AS key
+    SELECT UNNEST(json_keys(CAST(resource_attributes AS JSON))) AS key
     FROM traces
     WHERE {{timestamp_filter}}
 ),

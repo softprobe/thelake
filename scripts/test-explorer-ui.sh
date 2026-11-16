@@ -80,7 +80,7 @@ fi
 
 echo "==> Starting thelake..."
 DUCKDB_VERSION="$(awk '$1 == "duckdb_version" { print $2; exit }' "$ROOT/scripts/ducklake-extension.lock")"
-DUCKDB_LIB_DIR="$(find "$CARGO_TARGET_DIR/duckdb-download" -type f \( -name 'libduckdb.so*' -o -name 'libduckdb.dylib*' \) -path "*/$DUCKDB_VERSION/*" -print -quit 2>/dev/null | xargs dirname 2>/dev/null || true)"
+DUCKDB_LIB_DIR="$(find "$CARGO_TARGET_DIR/duckdb-download" -type f \( -name 'libduckdb.so*' -o -name 'libduckdb.dylib*' \) \( -path "*/$DUCKDB_VERSION/*" -o -path "*/v$DUCKDB_VERSION/*" \) -print -quit 2>/dev/null | xargs dirname 2>/dev/null || true)"
 if [[ -n "$DUCKDB_LIB_DIR" ]]; then
   case "$(uname -s)" in
     Darwin) export DYLD_LIBRARY_PATH="$DUCKDB_LIB_DIR${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}" ;;

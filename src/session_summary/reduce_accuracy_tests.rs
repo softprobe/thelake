@@ -889,8 +889,8 @@ fn map_only_attrs_do_not_fill_typed_aggregates() {
         .date_naive()
         .format("%Y-%m-%d");
     let bag = format!(
-        "MAP {{'{agent}': 'bag-agent', '{user}': 'bag-user', '{model}': 'bag-model', \
-         '{in_tok}': '99', '{out_tok}': '88', '{tot}': '187', '{cost}': '9.9'}}",
+        "JSON '{{\"{agent}\": \"bag-agent\", \"{user}\": \"bag-user\", \"{model}\": \"bag-model\", \
+         \"{in_tok}\": \"99\", \"{out_tok}\": \"88\", \"{tot}\": \"187\", \"{cost}\": \"9.9\"}}'::VARIANT",
         agent = sp::AGENT_NAME,
         user = sp::USER_ID,
         model = gen_ai::REQUEST_MODEL,

@@ -28,9 +28,11 @@ pub(crate) use physical_scope::{
 pub(crate) use writer::DuckLakeWriter;
 
 pub(crate) use attach::{
-    ducklake_qualified_table_name, ducklake_set_option_scope_for_qualified, DuckLakeSessionFactory,
-    DuckLakeSessionKind,
+    ducklake_qualified_table_name, DuckLakeSessionFactory, DuckLakeSessionKind,
 };
-pub use attach::{open_attached_from_config, open_attached_from_warehouse, AttachedSession};
+pub use attach::{
+    migrate_ducklake_catalog_from_config, open_attached_from_config, open_attached_from_warehouse,
+    AttachedSession,
+};
 pub(crate) use util::cache_httpfs_disabled_by_env;
 pub(crate) use workspace_views::validate_shared_workspace_schema;

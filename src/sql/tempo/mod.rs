@@ -323,7 +323,7 @@ fn trimmed_map_json_expr(
     };
     format!(
         "COALESCE(\
-            CAST(MAP_FROM_ENTRIES(list_filter(map_entries(TRY_CAST({column} AS MAP(VARCHAR, VARCHAR))), e -> {keep_predicate})) AS JSON), \
+            CAST(MAP_FROM_ENTRIES(list_filter(map_entries(TRY_CAST({column} AS MAP(VARCHAR, VARCHAR))), lambda e: {keep_predicate})) AS JSON), \
             CAST({column} AS JSON)\
         )"
     )

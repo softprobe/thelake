@@ -28,7 +28,7 @@ pub(crate) fn base_schema(table: &str) -> Schema {
         let duck_type: String = row.get(1).expect("column type");
         let nullable: String = row.get(2).expect("column nullability");
         let data_type = match duck_type.to_ascii_uppercase().as_str() {
-            "VARCHAR" | "TEXT" => DataType::Utf8,
+            "VARCHAR" | "TEXT" | "VARIANT" => DataType::Utf8,
             "BOOLEAN" => DataType::Boolean,
             "TINYINT" | "SMALLINT" | "INTEGER" | "INT" => DataType::Int32,
             "BIGINT" => DataType::Int64,
@@ -173,11 +173,11 @@ mod tests {
     use arrow::datatypes::{DataType, TimeUnit};
 
     #[test]
-    fn hot_attribute_columns_use_map() {
+    fn hot_attribute_columns_use_utf8_for_variant() {
         let traces = TraceTable::schema();
         assert!(matches!(
             traces.field_with_name("attributes").unwrap().data_type(),
-            DataType::Map(_, _)
+            DataType::Utf8
         ));
         assert!(matches!(
             traces.field_with_name("events").unwrap().data_type(),
@@ -187,20 +187,19 @@ mod tests {
         let logs = OtlpLogsTable::schema();
         assert!(matches!(
             logs.field_with_name("attributes").unwrap().data_type(),
-            DataType::Map(_, _)
+            DataType::Utf8
         ));
         assert!(matches!(
             logs.field_with_name("resource_attributes")
                 .unwrap()
                 .data_type(),
-            DataType::Map(_, _)
+            DataType::Utf8
         ));
 
-        // Scores metadata stays MAP (out of hot-column scope).
         let scores = ScoreTable::schema();
         assert!(matches!(
             scores.field_with_name("metadata").unwrap().data_type(),
-            DataType::Map(_, _)
+            DataType::Utf8
         ));
         assert!(scores.field_with_name("workspace_id").is_ok());
         assert!(ScoreConfigTable::schema()
@@ -222,8 +221,8 @@ mod tests {
                     .field_with_name(col)
                     .unwrap_or_else(|_| panic!("{table}.{col} missing from schema"));
                 assert!(
-                    matches!(field.data_type(), DataType::Map(_, _)),
-                    "{table}.{col} must stage as MAP(VARCHAR, VARCHAR)"
+                    matches!(field.data_type(), DataType::Utf8),
+                    "{table}.{col} must stage as Utf8 JSON for VARIANT"
                 );
             }
         }

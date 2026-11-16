@@ -338,6 +338,21 @@ pub fn open_attached_from_config(
     open_attached_connection(
         &PhysicalScope::from_ducklake(config),
         data_inlining_row_limit,
+        Some(&config.extension_path),
+        false,
+    )
+}
+
+/// Attach an existing DuckLake catalog with `AUTOMATIC_MIGRATION true` so
+/// DuckLake upgrades its metadata catalog tables (e.g. `1.0` -> `1.1`) in place.
+pub fn migrate_ducklake_catalog_from_config(
+    config: &crate::config::DuckLakeConfig,
+) -> AttachedSession {
+    open_attached_connection(
+        &PhysicalScope::from_ducklake(config),
+        config.data_inlining_row_limit,
+        Some(&config.extension_path),
+        true,
     )
 }
 
@@ -351,9 +366,12 @@ pub fn open_attached_from_warehouse(
     catalog_alias: impl Into<String>,
     data_inlining_row_limit: Option<u64>,
 ) -> AttachedSession {
+    let default_ext = crate::config::DuckLakeConfig::default().extension_path;
     open_attached_connection(
         &PhysicalScope::new(metadata_path, data_path, catalog_alias, metadata_schema),
         data_inlining_row_limit,
+        Some(&default_ext),
+        false,
     )
 }
 
@@ -362,13 +380,13 @@ pub fn open_attached_from_warehouse(
 pub(crate) fn open_attached_connection(
     scope: &PhysicalScope,
     data_inlining_row_limit: Option<u64>,
+    extension_path: Option<&str>,
+    automatic_migration: bool,
 ) -> AttachedSession {
     let connection = open_in_memory_capped(QUERY_DUCKDB_THREADS, "512MB").expect("duckdb");
-    apply_duckdb_init(
-        &connection,
-        &DuckDbInitParams::session(QUERY_DUCKDB_THREADS, "512MB"),
-    )
-    .expect("DuckDB init");
+    let mut init_params = DuckDbInitParams::session(QUERY_DUCKDB_THREADS, "512MB");
+    init_params.ducklake_extension_path = extension_path.map(Path::new);
+    apply_duckdb_init(&connection, &init_params).expect("DuckDB init");
     let warehouse = scope.warehouse_uri();
     if warehouse.contains("://") {
         let mut config = crate::config::Config::default();
@@ -381,10 +399,13 @@ pub(crate) fn open_attached_connection(
         configure_object_store(&connection, &config, warehouse).expect("object store");
     }
     let opts = ducklake_attach_options_for_scope(scope, false, data_inlining_row_limit);
-    let opts: Vec<String> = opts
+    let mut opts: Vec<String> = opts
         .into_iter()
         .filter(|o| !o.starts_with("CREATE_IF_NOT_EXISTS"))
         .collect();
+    if automatic_migration {
+        opts.push("AUTOMATIC_MIGRATION true".to_string());
+    }
     connection
         .execute_batch(&format!(
             "ATTACH 'ducklake:postgres:{}' AS {} ({});",
@@ -404,50 +425,12 @@ pub(crate) fn open_attached_connection(
     connection
 }
 
-/// Scoping clause for `CALL <catalog>.set_option(...)` matching a qualified table name.
-/// Three-part `catalog.schema.table` → `schema` + `table_name`; legacy two-part → `table_name` only.
-pub(crate) fn ducklake_set_option_scope_for_qualified(qualified_table: &str) -> String {
-    let parts: Vec<&str> = qualified_table.split('.').collect();
-    match parts.len() {
-        3 => {
-            let s = escape_sql_literal(parts[1]);
-            let t = escape_sql_literal(parts[2]);
-            format!("schema => '{s}', table_name => '{t}'")
-        }
-        2 => {
-            let t = escape_sql_literal(parts[1]);
-            format!("table_name => '{t}'")
-        }
-        _ => {
-            let t = escape_sql_literal(parts.last().copied().unwrap_or(""));
-            format!("table_name => '{t}'")
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::storage::ducklake::physical_scope::{
         DuckLakeAccess, PhysicalScope, WorkspaceBinding, WorkspaceScopeMode,
     };
-
-    #[test]
-    fn set_option_scope_matches_qualified_table_shape() {
-        assert_eq!(
-            ducklake_set_option_scope_for_qualified("softprobe.main.traces"),
-            "schema => 'main', table_name => 'traces'"
-        );
-        assert_eq!(
-            ducklake_set_option_scope_for_qualified("softprobe.tenant_a.traces"),
-            "schema => 'tenant_a', table_name => 'traces'"
-        );
-        // Legacy two-part still maps to table_name-only (should not appear for product paths).
-        assert_eq!(
-            ducklake_set_option_scope_for_qualified("softprobe.traces"),
-            "table_name => 'traces'"
-        );
-    }
 
     #[test]
     fn query_resource_caps_pin_single_thread() {

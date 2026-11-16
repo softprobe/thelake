@@ -83,7 +83,7 @@ pub(crate) fn compile_attribute_stats_query(
         let key_lit = sql_string_literal(&candidate.key);
         let col_alias = format!("c_{idx}");
         sample_projections.push(format!(
-            "(TRY_CAST({map_col} AS MAP(VARCHAR, VARCHAR)))[{key_lit}] AS {col_alias}"
+            "CAST({map_col}[{key_lit}] AS VARCHAR) AS {col_alias}"
         ));
         agg_projections.push(format!(
             "CAST(COUNT({col_alias}) AS BIGINT) AS non_null_{idx}"
@@ -141,12 +141,8 @@ mod tests {
         assert!(sql.contains("WHERE "));
         assert!(sql.contains("start_time"));
         assert!(sql.contains("LIMIT 10000"));
-        assert!(
-            sql.contains("TRY_CAST(attributes AS MAP(VARCHAR, VARCHAR)))['tenant.tier'] AS c_0")
-        );
-        assert!(sql.contains(
-            "TRY_CAST(resource_attributes AS MAP(VARCHAR, VARCHAR)))['o''reilly.env'] AS c_1"
-        ));
+        assert!(sql.contains("CAST(attributes['tenant.tier'] AS VARCHAR) AS c_0"));
+        assert!(sql.contains("CAST(resource_attributes['o''reilly.env'] AS VARCHAR) AS c_1"));
         assert!(sql.contains("strlen(c_0)"));
         assert!(sql.contains("approx_count_distinct(c_1)"));
     }

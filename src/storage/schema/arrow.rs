@@ -1,13 +1,11 @@
 use crate::models::{
     partition_day_from_event_time, Log, Score, ScoreConfig, ScoreDataType, ScoreSource, Span,
 };
-use crate::storage::schema::attribute_map::attribute_map_json_to_string_map;
 use anyhow::Result;
 use arrow::array::{
-    ArrayRef, BooleanArray, Float64Array, Int32Array, Int64Array, MapArray, StringArray,
-    StructArray, TimestampNanosecondArray,
+    ArrayRef, BooleanArray, Float64Array, Int32Array, Int64Array, StringArray,
+    TimestampNanosecondArray,
 };
-use arrow::buffer::OffsetBuffer;
 use arrow::datatypes::Schema;
 use arrow::record_batch::RecordBatch;
 use chrono::NaiveDate;
@@ -267,53 +265,16 @@ fn build_score_metadata_array(
 
 fn build_string_metadata_array<'a, I>(
     maps: I,
-    metadata_field: &arrow::datatypes::FieldRef,
+    _metadata_field: &arrow::datatypes::FieldRef,
 ) -> Result<ArrayRef>
 where
     I: IntoIterator<Item = &'a std::collections::HashMap<String, String>>,
 {
-    use arrow::datatypes::DataType;
-
-    let mut keys = Vec::new();
-    let mut values = Vec::new();
-    let mut offsets = vec![0i32];
-    let mut offset = 0i32;
-    for map in maps {
-        for (key, value) in map {
-            keys.push(key.as_str());
-            values.push(value.as_str());
-            offset += 1;
-        }
-        offsets.push(offset);
-    }
-
-    let entries_field = match metadata_field.data_type() {
-        DataType::Map(field, _) => field.clone(),
-        _ => return Err(anyhow::anyhow!("Expected Map type for score metadata")),
-    };
-    let struct_fields = match entries_field.data_type() {
-        DataType::Struct(fields) => fields.clone(),
-        _ => {
-            return Err(anyhow::anyhow!(
-                "Expected Struct type in score metadata map"
-            ))
-        }
-    };
-    let entries = StructArray::new(
-        struct_fields,
-        vec![
-            Arc::new(StringArray::from(keys)),
-            Arc::new(StringArray::from(values)),
-        ],
-        None,
-    );
-    Ok(Arc::new(MapArray::try_new(
-        entries_field,
-        OffsetBuffer::new(offsets.into()),
-        entries,
-        None,
-        false,
-    )?))
+    let encoded: Vec<String> = maps
+        .into_iter()
+        .map(crate::storage::schema::encode_attributes_json)
+        .collect();
+    Ok(Arc::new(StringArray::from(encoded)))
 }
 
 /// Base field names for traces table (used to identify promoted columns)
@@ -937,41 +898,25 @@ fn build_log_map_array(
     build_string_metadata_array(maps.iter().copied(), map_field)
 }
 
-/// Parse a reserved JSON-object attribute string into a string MAP.
-///
-/// On parse failure, stores the raw blob under `_raw`. Missing values yield an empty map.
-fn reserved_json_to_string_map(raw: Option<&str>) -> HashMap<String, String> {
-    let Some(text) = raw else {
-        return HashMap::new();
-    };
-    let parsed = match serde_json::from_str::<Value>(text) {
-        Ok(v) => v,
-        Err(_) => {
-            let mut m = HashMap::new();
-            m.insert("_raw".to_string(), text.to_string());
-            return m;
-        }
-    };
-    let map = attribute_map_json_to_string_map(&parsed);
-    if map.is_empty() && !text.is_empty() {
-        let mut m = HashMap::new();
-        m.insert("_raw".to_string(), text.to_string());
-        m
-    } else {
-        map
-    }
-}
-
 fn build_reserved_metadata_array(
     spans: &[Span],
     key: &str,
-    field: &arrow::datatypes::FieldRef,
+    _field: &arrow::datatypes::FieldRef,
 ) -> Result<ArrayRef> {
-    let maps: Vec<HashMap<String, String>> = spans
+    let default_json = if key == "__softprobe.links" {
+        "[]"
+    } else {
+        "{}"
+    };
+    let encoded: Vec<String> = spans
         .iter()
-        .map(|span| reserved_json_to_string_map(span.attributes.get(key).map(String::as_str)))
+        .map(|span| match span.attributes.get(key) {
+            Some(raw) if serde_json::from_str::<Value>(raw).is_ok() => raw.clone(),
+            Some(raw) => serde_json::json!({ "_raw": raw }).to_string(),
+            None => default_json.to_string(),
+        })
         .collect();
-    build_string_metadata_array(maps.iter(), field)
+    Ok(Arc::new(StringArray::from(encoded)))
 }
 
 #[cfg(test)]

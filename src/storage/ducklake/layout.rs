@@ -1,9 +1,6 @@
 use anyhow::{anyhow, Result};
 use duckdb::Connection;
-use std::thread;
-use std::time::Duration;
 
-use super::{ducklake_set_option_scope_for_qualified, PhysicalScope};
 use crate::sql::schema::{is_otlp_table, OTLP_LAYOUT_SQL};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -53,78 +50,39 @@ pub(crate) fn load_otlp_layout_profile(conn: &Connection) -> Result<OtlpLayoutPr
     .map_err(|error| anyhow!("failed to read canonical OTLP layout profile: {error}"))
 }
 
-/// Apply the shared physical settings to a table so inserts, flushes and
-/// compaction all use the same persisted DuckLake options.
-pub(crate) fn apply_otlp_layout_profile(
+/// Build the `CREATE TABLE IF NOT EXISTS` DDL for an OTLP table with
+/// `PARTITIONED BY`, `SORTED BY`, and `WITH (...)` options inline.
+pub(crate) fn otlp_create_table_ddl(
     conn: &Connection,
-    scope: &PhysicalScope,
-    table: &str,
-) -> Result<()> {
-    if !is_otlp_table(table) {
-        return Ok(());
+    base_ddl: &str,
+    table_name: &str,
+) -> Result<String> {
+    if !is_otlp_table(table_name) {
+        return Ok(base_ddl.to_string());
     }
     let profile = load_otlp_layout_profile(conn)?;
-    apply_otlp_writer_session_with_profile(conn, &profile)?;
-    let qualified = super::ducklake_qualified_table_name(scope, table);
-    let option_scope = ducklake_set_option_scope_for_qualified(&qualified);
-    let alias = scope.attach_alias();
-    let statements = [
-        format!(
-            "CALL {alias}.set_option('target_file_size', '{}', {option_scope});",
-            super::util::size_literal(profile.target_file_size_bytes as usize)
-        ),
-        format!(
-            "CALL {alias}.set_option('parquet_row_group_size_bytes', '{}', {option_scope});",
-            super::util::size_literal(profile.row_group_size_bytes as usize)
-        ),
-        format!(
-            "CALL {alias}.set_option('parquet_compression', '{}', {option_scope});",
-            profile.parquet_compression.replace('\'', "''")
-        ),
-        format!(
-            "CALL {alias}.set_option('parquet_compression_level', '{}', {option_scope});",
-            profile.parquet_compression_level
-        ),
-        format!(
-            "CALL {alias}.set_option('data_inlining_row_limit', {}, {option_scope});",
-            profile.data_inlining_row_limit
-        ),
-        format!(
-            "CALL {alias}.set_option('sort_on_insert', {}, {option_scope});",
-            profile.sort_on_insert
-        ),
-        format!(
-            "CALL {alias}.set_option('per_thread_output', {}, {option_scope});",
-            profile.per_thread_output
-        ),
-        format!("CALL {alias}.set_option('hive_file_pattern', true, {option_scope});"),
-    ];
-    let sql = statements.join("\n");
-    // Two writers can set the same catalog options at once. Postgres then
-    // aborts one serializable UPDATE. The options are the same values, so
-    // repeating the batch converges.
-    let mut attempt = 0;
-    loop {
-        match conn.execute_batch(&sql) {
-            Ok(()) => return Ok(()),
-            Err(error) if is_serialization_conflict(&error) && attempt < 4 => {
-                attempt += 1;
-                let _ = conn.execute_batch("ROLLBACK;");
-                thread::sleep(Duration::from_millis(20 * attempt));
-            }
-            Err(error) => {
-                return Err(anyhow!(
-                    "failed to apply canonical OTLP layout to {qualified}: {error}"
-                ));
-            }
-        }
-    }
-}
-
-fn is_serialization_conflict(error: &duckdb::Error) -> bool {
-    error
-        .to_string()
-        .contains("could not serialize access due to concurrent update")
+    let trimmed = base_ddl.trim_end().trim_end_matches(';');
+    Ok(format!(
+        "{trimmed} PARTITIONED BY ({}) SORTED BY ({}) WITH (\
+            target_file_size = '{}',\
+            parquet_row_group_size_bytes = '{}',\
+            parquet_compression = '{}',\
+            parquet_compression_level = {},\
+            data_inlining_row_limit = {},\
+            sort_on_insert = {},\
+            per_thread_output = {},\
+            hive_file_pattern = true\
+        );",
+        profile.partition_by,
+        profile.sorted_by,
+        super::util::size_literal(profile.target_file_size_bytes as usize),
+        super::util::size_literal(profile.row_group_size_bytes as usize),
+        profile.parquet_compression.replace('\'', "''"),
+        profile.parquet_compression_level,
+        profile.data_inlining_row_limit,
+        profile.sort_on_insert,
+        profile.per_thread_output,
+    ))
 }
 
 /// Apply the DuckDB session prerequisite for byte-sized row groups.
@@ -177,5 +135,46 @@ mod tests {
             assert!(is_otlp_table(table));
         }
         assert!(!is_otlp_table("score_configs"));
+    }
+
+    #[test]
+    fn create_table_ddl_supports_partition_sort_and_with_options() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let meta = tmp.path().join("meta.ducklake");
+        let data = tmp.path().join("data");
+        std::fs::create_dir_all(&data).expect("create data dir");
+        let cfg = duckdb::Config::default()
+            .with("allow_unsigned_extensions", "true")
+            .expect("duckdb config");
+        let conn = Connection::open_in_memory_with_flags(cfg).expect("open DuckDB");
+        let ext = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target/ducklake-extension/ducklake.duckdb_extension");
+        conn.execute_batch(&format!(
+            "LOAD '{}'; ATTACH 'ducklake:{}' AS lake (DATA_PATH '{}');",
+            ext.display(),
+            meta.display(),
+            data.display()
+        ))
+        .expect("attach ducklake");
+        let profile = load_otlp_layout_profile(&conn).expect("profile");
+        let base_ddl = "CREATE TABLE IF NOT EXISTS lake.traces (\
+            session_id VARCHAR NOT NULL,\
+            trace_id VARCHAR NOT NULL,\
+            timestamp TIMESTAMP_NS NOT NULL\
+        );";
+        let ddl = otlp_create_table_ddl(&conn, base_ddl, "traces").expect("build DDL");
+        conn.execute_batch(&ddl)
+            .expect("CREATE TABLE with DDL options");
+        assert!(
+            crate::storage::schema::ducklake_partition::table_partition_sort_matches(
+                &conn,
+                "lake.traces",
+                "traces",
+                &profile.partition_by,
+                &profile.sorted_by,
+            )
+            .expect("check partition/sort"),
+            "CREATE TABLE DDL must persist partition and sort keys"
+        );
     }
 }

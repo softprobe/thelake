@@ -135,7 +135,7 @@ mod tests {
 
         assert!(sql
             .contains("DELETE FROM softprobe.shared.traces WHERE workspace_id = 'workspace''42';"));
-        assert!(sql.contains("CALL ducklake_rewrite_data_files( 'softprobe', 'traces', schema => 'shared', delete_threshold => 0 );"));
+        assert!(sql.contains("CALL ducklake_rewrite_data_files( 'softprobe', 'traces', schema => 'shared', delete_threshold => 0, max_compacted_files => 64 );"));
         assert!(sql.contains("holder_id = 'holder''42' AND epoch = 7 AND lease_until > now()"));
         assert!(sql.contains("thelake_job_lease"));
     }
@@ -164,5 +164,28 @@ mod tests {
             "AND \"registry\"\"schema\".workspace_scope_binding.lifecycle_status = 'active'"
         ));
         assert!(normalize_sql(&list).contains("WHERE wb.lifecycle_status = 'active'"));
+    }
+
+    #[test]
+    fn ducklake_rewrite_data_files_accepts_max_compacted_files() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let meta = tmp.path().join("meta.ducklake");
+        let data = tmp.path().join("data");
+        std::fs::create_dir_all(&data).expect("create data dir");
+        let cfg = duckdb::Config::default()
+            .with("allow_unsigned_extensions", "true")
+            .expect("duckdb config");
+        let conn = duckdb::Connection::open_in_memory_with_flags(cfg).expect("open DuckDB");
+        let ext = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target/ducklake-extension/ducklake.duckdb_extension");
+        conn.execute_batch(&format!(
+            "LOAD '{}'; ATTACH 'ducklake:{}' AS lake (DATA_PATH '{}');\
+             CREATE TABLE lake.main.traces (id INTEGER);\
+             CALL ducklake_rewrite_data_files('lake', 'traces', schema => 'main', delete_threshold => 0, max_compacted_files => 64);",
+            ext.display(),
+            meta.display(),
+            data.display()
+        ))
+        .expect("ducklake_rewrite_data_files with max_compacted_files");
     }
 }
