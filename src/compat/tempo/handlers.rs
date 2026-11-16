@@ -32,7 +32,10 @@ async fn backend_for(
             format!("workspace engine unavailable: {err}"),
         )
     })?;
-    Ok(DuckLakeTraceBackend::new(ws.query().clone()))
+    Ok(DuckLakeTraceBackend::with_tag_index(
+        ws.query().clone(),
+        ws.tag_index_reader(),
+    ))
 }
 
 fn compat_workspace_context(

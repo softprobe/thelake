@@ -20,6 +20,7 @@ pub mod session_summary;
 pub mod softprobe_assertion;
 pub mod sql;
 pub mod storage;
+pub mod tag_index;
 pub mod website;
 pub mod workspace;
 pub mod workspace_scope;
