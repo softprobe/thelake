@@ -241,3 +241,61 @@ def test_migrate_table_partitions_dry_run_does_not_mutate_dst() -> None:
     assert parts == 0
     assert rows == 2
     assert conn.execute(ml.load_sql("test_select_attached_dst_traces.sql")).fetchall() == []
+
+
+def test_migrate_ducklake_data_closes_duck_before_drop_and_uses_src_schema(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    seen_qualifiers: list[tuple[str, str]] = []
+
+    class FakeDuckConn:
+        def execute(self, sql: str):
+            return self
+
+        def close(self) -> None:
+            events.append("duck_close")
+
+    class FakePgConn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    monkeypatch.setattr(ml.psycopg, "connect", lambda dsn: FakePgConn())
+    monkeypatch.setattr(ml.duckdb, "connect", lambda *a, **kw: FakeDuckConn())
+    monkeypatch.setattr(
+        ml, "clone_pg_schema", lambda conn, s, c: events.append(f"clone:{s}->{c}")
+    )
+    monkeypatch.setattr(
+        ml, "drop_pg_schema", lambda conn, c: events.append(f"drop:{c}")
+    )
+
+    def fake_migrate(duck_conn, pg_conn, cfg, src_q, dst_q, table):
+        seen_qualifiers.append((src_q, dst_q))
+        return (0, 0)
+
+    monkeypatch.setattr(ml, "migrate_table_partitions", fake_migrate)
+
+    cfg = ml.MigrationConfig(
+        pg_dsn="host=localhost dbname=test",
+        src_schema="thelake_prod",
+        src_data_path="/tmp/src",
+        dst_schema="thelake_prod_v0_1_34",
+        dst_data_path="/tmp/dst",
+        migration_id="test",
+        src_auto_migrate=True,
+        clone_src_schema="thelake_prod_mig_src",
+        dry_run=True,
+    )
+    ml.migrate_ducklake_data(cfg)
+    assert events == [
+        "clone:thelake_prod->thelake_prod_mig_src",
+        "duck_close",
+        "drop:thelake_prod_mig_src",
+    ]
+    assert all(
+        sq == "src_lake.thelake_prod" and dq == "dst_lake.thelake_prod_v0_1_34"
+        for sq, dq in seen_qualifiers
+    )

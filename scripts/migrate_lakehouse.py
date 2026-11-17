@@ -603,6 +603,7 @@ def migrate_ducklake_data(cfg: MigrationConfig) -> dict[str, tuple[int, int]]:
         with psycopg.connect(cfg.pg_dsn) as pg_conn:
             clone_pg_schema(pg_conn, cfg.src_schema, cfg.clone_src_schema)
 
+    duck_conn: duckdb.DuckDBPyConnection | None = None
     try:
         duck_conn = duckdb.connect(
             ":memory:",
@@ -655,7 +656,7 @@ def migrate_ducklake_data(cfg: MigrationConfig) -> dict[str, tuple[int, int]]:
         with psycopg.connect(cfg.pg_dsn) as pg_conn:
             if not cfg.dry_run:
                 ensure_progress_table(pg_conn, cfg.dst_schema)
-            src_qualifier = f"src_lake.{src_attach_schema}"
+            src_qualifier = f"src_lake.{cfg.src_schema}"
             dst_qualifier = f"dst_lake.{cfg.dst_schema}"
             for table in TELEMETRY_TABLES:
                 results[table] = migrate_table_partitions(
@@ -663,6 +664,8 @@ def migrate_ducklake_data(cfg: MigrationConfig) -> dict[str, tuple[int, int]]:
                 )
         return results
     finally:
+        if duck_conn is not None:
+            duck_conn.close()
         if cfg.clone_src_schema:
             with psycopg.connect(cfg.pg_dsn) as pg_conn:
                 drop_pg_schema(pg_conn, cfg.clone_src_schema)
