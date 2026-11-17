@@ -89,18 +89,19 @@ pub(crate) fn render_ducklake_attach_sql(
         .replace("{{dst_data_path}}", dst_data_path)
 }
 
-pub(crate) fn render_ducklake_distinct_days_sql(table: &str) -> String {
-    DUCKLAKE_DISTINCT_DAYS_SQL.replace("{{table}}", table)
+pub(crate) fn render_ducklake_distinct_days_sql(src_table: &str) -> String {
+    DUCKLAKE_DISTINCT_DAYS_SQL.replace("{{src_table}}", src_table)
 }
 
-pub(crate) fn render_ducklake_day_count_sql(table: &str, day_start: &str) -> String {
+pub(crate) fn render_ducklake_day_count_sql(dst_table: &str, day_start: &str) -> String {
     DUCKLAKE_DAY_COUNT_SQL
-        .replace("{{table}}", table)
+        .replace("{{dst_table}}", dst_table)
         .replace("{{day_start}}", day_start)
 }
 
 pub(crate) fn render_ducklake_insert_day_sql(
-    table: &str,
+    src_table: &str,
+    dst_table: &str,
     insert_cols: &str,
     select_exprs: &str,
     day_start: &str,
@@ -109,13 +110,16 @@ pub(crate) fn render_ducklake_insert_day_sql(
     let dedup_clause = if dedup_traces {
         format!(
             " {}",
-            DUCKLAKE_TRACES_DEDUP_SQL.replace("{{day_start}}", day_start)
+            DUCKLAKE_TRACES_DEDUP_SQL
+                .replace("{{dst_traces_table}}", dst_table)
+                .replace("{{day_start}}", day_start)
         )
     } else {
         String::new()
     };
     DUCKLAKE_INSERT_DAY_SQL
-        .replace("{{table}}", table)
+        .replace("{{src_table}}", src_table)
+        .replace("{{dst_table}}", dst_table)
         .replace("{{insert_cols}}", insert_cols)
         .replace("{{select_exprs}}", select_exprs)
         .replace("{{day_start}}", day_start)
@@ -123,12 +127,14 @@ pub(crate) fn render_ducklake_insert_day_sql(
 }
 
 pub(crate) fn render_ducklake_insert_all_sql(
-    table: &str,
+    src_table: &str,
+    dst_table: &str,
     insert_cols: &str,
     select_exprs: &str,
 ) -> String {
     DUCKLAKE_INSERT_ALL_SQL
-        .replace("{{table}}", table)
+        .replace("{{src_table}}", src_table)
+        .replace("{{dst_table}}", dst_table)
         .replace("{{insert_cols}}", insert_cols)
         .replace("{{select_exprs}}", select_exprs)
 }

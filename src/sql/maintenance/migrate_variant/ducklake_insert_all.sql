@@ -1,3 +1,3 @@
-INSERT INTO dst_lake.{{table}} ({{insert_cols}})
+INSERT INTO {{dst_table}} ({{insert_cols}})
 SELECT {{select_exprs}}
-FROM src_lake.{{table}};
+FROM {{src_table}};

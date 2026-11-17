@@ -1,5 +1,5 @@
 AND NOT EXISTS (
-    SELECT 1 FROM dst_lake.traces d
+    SELECT 1 FROM {{dst_traces_table}} d
     WHERE d.trace_id = s.trace_id
       AND d.span_id = s.span_id
       AND d.timestamp = s.timestamp
