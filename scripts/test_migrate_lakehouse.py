@@ -166,3 +166,53 @@ def test_migrate_table_partitions_with_attached_named_schemas() -> None:
         ml.load_sql("test_select_attached_dst_traces.sql")
     ).fetchall()
     assert dst_rows == [("t1", "v"), ("t2", None)]
+
+
+def test_parse_args_derives_versioned_naming_and_allows_legacy_overrides() -> None:
+    cfg = ml.parse_args(
+        [
+            "--pg-dsn",
+            "host=localhost dbname=test",
+            "--env",
+            "prod",
+            "--src-version",
+            "0.1.33",
+            "--dst-version",
+            "v0.1.34",
+        ]
+    )
+    assert cfg.src_schema == "thelake_prod_v0_1_33"
+    assert cfg.src_data_path == "gs://softprobe-thelake/prod/shared-v0.1.33/"
+    assert cfg.dst_schema == "thelake_prod_v0_1_34"
+    assert cfg.dst_data_path == "gs://softprobe-thelake/prod/shared-v0.1.34/"
+
+    legacy_cfg = ml.parse_args(
+        [
+            "--pg-dsn",
+            "host=localhost dbname=test",
+            "--env",
+            "staging",
+            "--src-schema",
+            "thelake_staging_ducklake11",
+            "--src-data-path",
+            "gs://softprobe-thelake/staging/shared-ducklake11/",
+            "--dst-version",
+            "v0.1.34",
+        ]
+    )
+    assert legacy_cfg.src_schema == "thelake_staging_ducklake11"
+    assert legacy_cfg.src_data_path == "gs://softprobe-thelake/staging/shared-ducklake11/"
+    assert legacy_cfg.dst_schema == "thelake_staging_v0_1_34"
+    assert legacy_cfg.dst_data_path == "gs://softprobe-thelake/staging/shared-v0.1.34/"
+
+    with pytest.raises(SystemExit):
+        ml.parse_args(
+            [
+                "--pg-dsn",
+                "host=localhost dbname=test",
+                "--env",
+                "staging",
+                "--dst-version",
+                "v0.1.34",
+            ]
+        )

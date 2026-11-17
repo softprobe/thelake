@@ -55,6 +55,39 @@ OPERATIONAL_PG_TABLES = (
 )
 _PG_IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _ISO_TS_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$")
+_SEMVER_RE = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)$")
+
+
+def normalize_release_version(version: str) -> tuple[str, str]:
+    """Return (gcs_tag, pg_token) e.g. ('v0.1.34', 'v0_1_34')."""
+    match = _SEMVER_RE.match(version.strip())
+    if not match:
+        raise ValueError(
+            f"version must match vX.Y.Z (e.g. v0.1.34): {version!r}"
+        )
+    major, minor, patch = match.groups()
+    return f"v{major}.{minor}.{patch}", f"v{major}_{minor}_{patch}"
+
+
+def resolve_endpoint(
+    side: str,
+    schema: str | None,
+    data_path: str | None,
+    env: str | None,
+    version: str | None,
+    bucket: str,
+) -> tuple[str, str]:
+    if schema is not None and data_path is not None:
+        return validate_pg_ident(schema), data_path
+    if not env or not version:
+        raise ValueError(
+            f"--{side}-schema and --{side}-data-path are required unless both --env and --{side}-version are set"
+        )
+    validate_pg_ident(env)
+    gcs_tag, pg_token = normalize_release_version(version)
+    resolved_schema = schema or f"thelake_{env}_{pg_token}"
+    resolved_path = data_path or f"gs://{bucket}/{env}/shared-{gcs_tag}/"
+    return validate_pg_ident(resolved_schema), resolved_path
 
 
 def load_sql(name: str, **params: str) -> str:
@@ -640,10 +673,18 @@ def parse_args(argv: Sequence[str] | None = None) -> MigrationConfig:
         description="Blue/green lakehouse migration tool for thelake"
     )
     parser.add_argument("--pg-dsn", default=os.environ.get("DUCKLAKE_METADATA_PATH"))
-    parser.add_argument("--src-schema", required=True)
-    parser.add_argument("--src-data-path", required=True)
-    parser.add_argument("--dst-schema", required=True)
-    parser.add_argument("--dst-data-path", required=True)
+    parser.add_argument("--env", default=None, help="Environment name (e.g. staging, prod) for versioned naming")
+    parser.add_argument(
+        "--bucket",
+        default=os.environ.get("DATALAKE_BUCKET", "softprobe-thelake"),
+        help="GCS bucket used when deriving data paths from --env and --*-version",
+    )
+    parser.add_argument("--src-version", default=None, help="Source thelake release version (e.g. v0.1.33)")
+    parser.add_argument("--dst-version", default=None, help="Destination thelake release version (e.g. v0.1.34)")
+    parser.add_argument("--src-schema", default=None, help="Override source Postgres schema (for legacy names)")
+    parser.add_argument("--src-data-path", default=None, help="Override source GCS/local data path (for legacy prefixes)")
+    parser.add_argument("--dst-schema", default=None, help="Override destination Postgres schema")
+    parser.add_argument("--dst-data-path", default=None, help="Override destination GCS/local data path")
     parser.add_argument(
         "--migration-id",
         default=None,
@@ -680,14 +721,22 @@ def parse_args(argv: Sequence[str] | None = None) -> MigrationConfig:
     ns = parser.parse_args(argv)
     if not ns.pg_dsn:
         parser.error("--pg-dsn or DUCKLAKE_METADATA_PATH is required")
-    if ns.src_schema == ns.dst_schema:
+    try:
+        src_schema, src_data_path = resolve_endpoint(
+            "src", ns.src_schema, ns.src_data_path, ns.env, ns.src_version, ns.bucket
+        )
+        dst_schema, dst_data_path = resolve_endpoint(
+            "dst", ns.dst_schema, ns.dst_data_path, ns.env, ns.dst_version, ns.bucket
+        )
+    except ValueError as exc:
+        parser.error(str(exc))
+
+    if src_schema == dst_schema:
         parser.error("--src-schema and --dst-schema must differ for blue/green safety")
 
-    validate_pg_ident(ns.src_schema)
-    validate_pg_ident(ns.dst_schema)
     if ns.clone_src_schema:
         validate_pg_ident(ns.clone_src_schema)
-        if ns.clone_src_schema in (ns.src_schema, ns.dst_schema):
+        if ns.clone_src_schema in (src_schema, dst_schema):
             parser.error("--clone-src-schema must differ from --src-schema and --dst-schema")
     if ns.src_auto_migrate and not ns.clone_src_schema and not ns.allow_live_src_auto_migrate:
         parser.error(
@@ -698,13 +747,13 @@ def parse_args(argv: Sequence[str] | None = None) -> MigrationConfig:
     if ns.until:
         validate_iso_utc(ns.until)
 
-    migration_id = ns.migration_id or f"{ns.src_schema}-to-{ns.dst_schema}"
+    migration_id = ns.migration_id or f"{src_schema}-to-{dst_schema}"
     return MigrationConfig(
         pg_dsn=ns.pg_dsn,
-        src_schema=ns.src_schema,
-        src_data_path=ns.src_data_path,
-        dst_schema=ns.dst_schema,
-        dst_data_path=ns.dst_data_path,
+        src_schema=src_schema,
+        src_data_path=src_data_path,
+        dst_schema=dst_schema,
+        dst_data_path=dst_data_path,
         migration_id=migration_id,
         ducklake_extension=ns.ducklake_extension,
         src_auto_migrate=ns.src_auto_migrate,
