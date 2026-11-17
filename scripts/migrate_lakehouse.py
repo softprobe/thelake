@@ -439,7 +439,7 @@ def migrate_table_partitions(
 
     has_timestamp = any(name.lower() == "timestamp" for name, _ in src_cols)
     if not has_timestamp:
-        if pg_conn is not None and is_partition_done(
+        if not cfg.dry_run and pg_conn is not None and is_partition_done(
             pg_conn, cfg.dst_schema, cfg.migration_id, table, "__all__"
         ):
             return (0, 0)
@@ -495,7 +495,7 @@ def migrate_table_partitions(
             continue
         start_ts, end_ts = bounds
         partition_key = f"{day}|{start_ts}|{end_ts}"
-        if pg_conn is not None and is_partition_done(
+        if not cfg.dry_run and pg_conn is not None and is_partition_done(
             pg_conn, cfg.dst_schema, cfg.migration_id, table, partition_key
         ):
             continue

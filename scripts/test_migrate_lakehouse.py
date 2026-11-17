@@ -216,3 +216,28 @@ def test_parse_args_derives_versioned_naming_and_allows_legacy_overrides() -> No
                 "v0.1.34",
             ]
         )
+
+
+def test_migrate_table_partitions_dry_run_does_not_mutate_dst() -> None:
+    conn = duckdb.connect(":memory:")
+    conn.execute(ml.load_sql("test_seed_attached_schemas.sql"))
+
+    class FailIfQueriedPgConn:
+        def cursor(self):
+            raise AssertionError("dry_run must not query _migration_progress")
+
+    cfg = ml.MigrationConfig(
+        pg_dsn="unused",
+        src_schema="thelake",
+        src_data_path="/tmp/src",
+        dst_schema="thelake_v2",
+        dst_data_path="/tmp/dst",
+        migration_id="test-dry-run",
+        dry_run=True,
+    )
+    parts, rows = ml.migrate_table_partitions(
+        conn, FailIfQueriedPgConn(), cfg, "src_lake.thelake", "dst_lake.thelake_v2", "traces"
+    )
+    assert parts == 0
+    assert rows == 2
+    assert conn.execute(ml.load_sql("test_select_attached_dst_traces.sql")).fetchall() == []
