@@ -26,6 +26,8 @@ These scripts are run directly and do not have Make targets:
   DuckLake.
 - `copy_traces_workspace_uuid.py` — copy traces into a workspace-scoped lake;
   see its usage and environment-variable documentation in the script header.
+- `migrate_lakehouse.py` — standalone blue/green lakehouse migration tool for
+  Postgres control tables and DuckLake telemetry (`uv run scripts/migrate_lakehouse.py --help`).
 - `reingest_traces_otlp.py` — replay stored traces through the OTLP ingest API;
   see its usage and environment-variable documentation in the script header.
 

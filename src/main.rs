@@ -25,17 +25,6 @@ fn main() -> anyhow::Result<()> {
 
     info!("Starting thelake v{}", env!("CARGO_PKG_VERSION"));
 
-    if std::env::args().nth(1).as_deref() == Some("migrate-variant") {
-        use clap::Parser;
-        let args = softprobe_runtime::migrate_variant::MigrateVariantArgs::parse_from(
-            std::env::args().skip(1),
-        );
-        let rt = tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()?;
-        return rt.block_on(softprobe_runtime::migrate_variant::run_cli(args));
-    }
-
     let config = Arc::new(Config::load()?);
     info!("Configuration loaded");
 

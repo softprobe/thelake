@@ -1,0 +1,5 @@
+SELECT trace_id, CAST(attributes['k'] AS VARCHAR)
+FROM dst_db.traces
+WHERE timestamp >= '2026-01-01T00:00:00Z'::TIMESTAMPTZ::TIMESTAMP_NS
+  AND timestamp < '2027-01-01T00:00:00Z'::TIMESTAMPTZ::TIMESTAMP_NS
+ORDER BY trace_id;
