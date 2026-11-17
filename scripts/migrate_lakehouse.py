@@ -74,6 +74,8 @@ class MigrationConfig:
     migration_id: str
     ducklake_extension: str | None = None
     src_auto_migrate: bool = False
+    clone_src_schema: str | None = None
+    allow_live_src_auto_migrate: bool = False
     since: str | None = None
     until: str | None = None
     dry_run: bool = False
@@ -360,7 +362,13 @@ def _configure_object_store(conn: duckdb.DuckDBPyConnection, data_path: str) -> 
 def _describe_table(
     conn: duckdb.DuckDBPyConnection, db: str, table: str
 ) -> list[tuple[str, str]] | None:
-    row = conn.execute(load_sql("duckdb_table_exists.sql"), [db, table]).fetchone()
+    if "." in db:
+        catalog_name, schema_name = db.split(".", 1)
+    else:
+        catalog_name, schema_name = db, "main"
+    row = conn.execute(
+        load_sql("duckdb_table_exists.sql"), [catalog_name, schema_name, table]
+    ).fetchone()
     if not row or row[0] == 0:
         return None
     return [
@@ -432,7 +440,7 @@ def migrate_table_partitions(
         return (1, dst_count)
 
     since_ts = escape_sql_literal(cfg.since or "1970-01-01T00:00:00Z")
-    until_ts = escape_sql_literal(cfg.until or "9999-12-31T23:59:59Z")
+    until_ts = escape_sql_literal(cfg.until or "2262-01-01T00:00:00Z")
     days = [
         r[0]
         for r in duck_conn.execute(
@@ -522,66 +530,109 @@ def migrate_table_partitions(
     return (partitions_copied, rows_copied)
 
 
+def clone_pg_schema(
+    conn: psycopg.Connection, src_schema: str, clone_schema: str
+) -> None:
+    validate_pg_ident(src_schema)
+    validate_pg_ident(clone_schema)
+    with conn.cursor() as cur:
+        cur.execute(load_sql("pg_recreate_schema.sql", schema=clone_schema))
+        cur.execute(load_sql("pg_list_tables.sql"), (src_schema,))
+        tables = [row[0] for row in cur.fetchall()]
+        for table in tables:
+            validate_pg_ident(table)
+            cur.execute(
+                load_sql(
+                    "pg_clone_table.sql",
+                    src_schema=src_schema,
+                    dst_schema=clone_schema,
+                    table=table,
+                )
+            )
+    conn.commit()
+
+
+def drop_pg_schema(conn: psycopg.Connection, schema: str) -> None:
+    validate_pg_ident(schema)
+    with conn.cursor() as cur:
+        cur.execute(load_sql("pg_drop_schema.sql", schema=schema))
+    conn.commit()
+
+
 def migrate_ducklake_data(cfg: MigrationConfig) -> dict[str, tuple[int, int]]:
     validate_pg_ident(cfg.src_schema)
     validate_pg_ident(cfg.dst_schema)
+    if cfg.clone_src_schema:
+        validate_pg_ident(cfg.clone_src_schema)
 
-    duck_conn = duckdb.connect(
-        ":memory:",
-        config={
-            "allow_unsigned_extensions": "true",
-            "memory_limit": cfg.memory_limit,
-            "threads": cfg.threads,
-        },
-    )
-    if cfg.ducklake_extension:
-        duck_conn.execute(f"LOAD '{escape_sql_literal(cfg.ducklake_extension)}'")
-    else:
-        duck_conn.execute("LOAD ducklake")
+    src_attach_schema = cfg.clone_src_schema or cfg.src_schema
+    if cfg.clone_src_schema:
+        with psycopg.connect(cfg.pg_dsn) as pg_conn:
+            clone_pg_schema(pg_conn, cfg.src_schema, cfg.clone_src_schema)
 
-    _configure_object_store(duck_conn, cfg.src_data_path)
-    if cfg.dst_data_path != cfg.src_data_path:
-        _configure_object_store(duck_conn, cfg.dst_data_path)
-
-    src_opts = [
-        f"METADATA_SCHEMA '{escape_sql_literal(cfg.src_schema)}'",
-        f"DATA_PATH '{escape_sql_literal(cfg.src_data_path)}'",
-        "CREATE_IF_NOT_EXISTS false",
-    ]
-    if cfg.src_auto_migrate:
-        src_opts.append("AUTOMATIC_MIGRATION true")
-
-    duck_conn.execute(
-        load_sql(
-            "duckdb_attach_lake.sql",
-            dsn=escape_sql_literal(cfg.pg_dsn),
-            alias="src_lake",
-            options=", ".join(src_opts),
+    try:
+        duck_conn = duckdb.connect(
+            ":memory:",
+            config={
+                "allow_unsigned_extensions": "true",
+                "memory_limit": cfg.memory_limit,
+                "threads": cfg.threads,
+            },
         )
-    )
-    dst_opts = [
-        f"METADATA_SCHEMA '{escape_sql_literal(cfg.dst_schema)}'",
-        f"DATA_PATH '{escape_sql_literal(cfg.dst_data_path)}'",
-        "CREATE_IF_NOT_EXISTS false",
-    ]
-    duck_conn.execute(
-        load_sql(
-            "duckdb_attach_lake.sql",
-            dsn=escape_sql_literal(cfg.pg_dsn),
-            alias="dst_lake",
-            options=", ".join(dst_opts),
-        )
-    )
+        if cfg.ducklake_extension:
+            duck_conn.execute(f"LOAD '{escape_sql_literal(cfg.ducklake_extension)}'")
+        else:
+            duck_conn.execute("LOAD ducklake")
 
-    results: dict[str, tuple[int, int]] = {}
-    with psycopg.connect(cfg.pg_dsn) as pg_conn:
-        if not cfg.dry_run:
-            ensure_progress_table(pg_conn, cfg.dst_schema)
-        for table in TELEMETRY_TABLES:
-            results[table] = migrate_table_partitions(
-                duck_conn, pg_conn, cfg, "src_lake", "dst_lake", table
+        _configure_object_store(duck_conn, cfg.src_data_path)
+        if cfg.dst_data_path != cfg.src_data_path:
+            _configure_object_store(duck_conn, cfg.dst_data_path)
+
+        src_opts = [
+            f"METADATA_SCHEMA '{escape_sql_literal(src_attach_schema)}'",
+            f"DATA_PATH '{escape_sql_literal(cfg.src_data_path)}'",
+            "CREATE_IF_NOT_EXISTS false",
+        ]
+        if cfg.src_auto_migrate:
+            src_opts.append("AUTOMATIC_MIGRATION true")
+
+        duck_conn.execute(
+            load_sql(
+                "duckdb_attach_lake.sql",
+                dsn=escape_sql_literal(cfg.pg_dsn),
+                alias="src_lake",
+                options=", ".join(src_opts),
             )
-    return results
+        )
+        dst_opts = [
+            f"METADATA_SCHEMA '{escape_sql_literal(cfg.dst_schema)}'",
+            f"DATA_PATH '{escape_sql_literal(cfg.dst_data_path)}'",
+            "CREATE_IF_NOT_EXISTS false",
+        ]
+        duck_conn.execute(
+            load_sql(
+                "duckdb_attach_lake.sql",
+                dsn=escape_sql_literal(cfg.pg_dsn),
+                alias="dst_lake",
+                options=", ".join(dst_opts),
+            )
+        )
+
+        results: dict[str, tuple[int, int]] = {}
+        with psycopg.connect(cfg.pg_dsn) as pg_conn:
+            if not cfg.dry_run:
+                ensure_progress_table(pg_conn, cfg.dst_schema)
+            src_qualifier = f"src_lake.{src_attach_schema}"
+            dst_qualifier = f"dst_lake.{cfg.dst_schema}"
+            for table in TELEMETRY_TABLES:
+                results[table] = migrate_table_partitions(
+                    duck_conn, pg_conn, cfg, src_qualifier, dst_qualifier, table
+                )
+        return results
+    finally:
+        if cfg.clone_src_schema:
+            with psycopg.connect(cfg.pg_dsn) as pg_conn:
+                drop_pg_schema(pg_conn, cfg.clone_src_schema)
 
 
 def parse_args(argv: Sequence[str] | None = None) -> MigrationConfig:
@@ -605,7 +656,17 @@ def parse_args(argv: Sequence[str] | None = None) -> MigrationConfig:
     parser.add_argument(
         "--src-auto-migrate",
         action="store_true",
-        help="Pass AUTOMATIC_MIGRATION true when attaching src_lake (use only on a cloned PG schema)",
+        help="Pass AUTOMATIC_MIGRATION true when attaching src_lake (requires --clone-src-schema or --allow-live-src-auto-migrate)",
+    )
+    parser.add_argument(
+        "--clone-src-schema",
+        default=None,
+        help="Clone src_schema metadata into a temporary Postgres schema before attaching DuckLake (dropped on exit)",
+    )
+    parser.add_argument(
+        "--allow-live-src-auto-migrate",
+        action="store_true",
+        help="Allow --src-auto-migrate directly against live src_schema (mutates source catalog metadata)",
     )
     parser.add_argument("--since", default=None, help="Inclusive UTC ISO-8601 bound (Z)")
     parser.add_argument("--until", default=None, help="Exclusive UTC ISO-8601 bound (Z)")
@@ -624,6 +685,14 @@ def parse_args(argv: Sequence[str] | None = None) -> MigrationConfig:
 
     validate_pg_ident(ns.src_schema)
     validate_pg_ident(ns.dst_schema)
+    if ns.clone_src_schema:
+        validate_pg_ident(ns.clone_src_schema)
+        if ns.clone_src_schema in (ns.src_schema, ns.dst_schema):
+            parser.error("--clone-src-schema must differ from --src-schema and --dst-schema")
+    if ns.src_auto_migrate and not ns.clone_src_schema and not ns.allow_live_src_auto_migrate:
+        parser.error(
+            "--src-auto-migrate mutates source catalog metadata; pass --clone-src-schema <tmp_schema> or --allow-live-src-auto-migrate"
+        )
     if ns.since:
         validate_iso_utc(ns.since)
     if ns.until:
@@ -639,6 +708,8 @@ def parse_args(argv: Sequence[str] | None = None) -> MigrationConfig:
         migration_id=migration_id,
         ducklake_extension=ns.ducklake_extension,
         src_auto_migrate=ns.src_auto_migrate,
+        clone_src_schema=ns.clone_src_schema,
+        allow_live_src_auto_migrate=ns.allow_live_src_auto_migrate,
         since=ns.since,
         until=ns.until,
         dry_run=ns.dry_run,
