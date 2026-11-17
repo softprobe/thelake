@@ -9,6 +9,19 @@
 3. **Breaking Parquet type rewrites (blue/green Python job):**
    Rare breaking Parquet rewrites (such as `MAP(VARCHAR, VARCHAR)` to `VARIANT`) are executed via `scripts/migrate_lakehouse.py`, which tracks per-partition progress in `_migration_progress`.
 
+## Blue/Green Naming Convention
+
+When a breaking Parquet rewrite creates a new target catalog and GCS prefix, name them after the **`thelake` release version** that introduces the layout:
+
+| Artifact | Pattern | Example (`prod`, `v0.1.34`) |
+| :--- | :--- | :--- |
+| **Postgres metadata schema** | `thelake_<env>_v<major>_<minor>_<patch>` | `thelake_prod_v0_1_34` |
+| **GCS data prefix** | `<env>/shared-v<major>.<minor>.<patch>` | `prod/shared-v0.1.34` |
+| **Temp clone schema** | `thelake_<env>_mig_src` | `thelake_prod_mig_src` (auto-dropped) |
+
+- Postgres schemas use underscores (`v0_1_34`) because unquoted SQL identifiers cannot contain dots.
+- Keep at most two generations per environment (the active schema/prefix and the previous rollback target), and drop older schemas and GCS prefixes once cutover is verified.
+
 ## Common commands
 
 ```bash
