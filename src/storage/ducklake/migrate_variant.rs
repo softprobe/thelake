@@ -353,10 +353,11 @@ fn describe_duckdb_table(
     conn: &Connection,
     qualified: &str,
 ) -> Result<Option<Vec<(String, String)>>> {
-    if let Some((db, table)) = qualified.split_once('.') {
+    let parts: Vec<&str> = qualified.split('.').collect();
+    if parts.len() == 3 {
         let exists: i64 = conn.query_row(
             sql_templates::ducklake_table_exists_sql(),
-            [db, table],
+            [parts[0], parts[1], parts[2]],
             |r| r.get(0),
         )?;
         if exists == 0 {
@@ -413,22 +414,27 @@ pub fn migrate_ducklake_tables(
     ))
     .context("open src_lake and dst_lake")?;
 
+    let src_qualifier = format!("src_lake.{src_schema}");
+    let dst_qualifier = format!("dst_lake.{dst_schema}");
+
     let mut reports = Vec::new();
     for table in TELEMETRY_TABLES {
-        let Some(src_cols) = describe_duckdb_table(&conn, &format!("src_lake.{table}"))? else {
+        let src_table = format!("{src_qualifier}.{table}");
+        let dst_table = format!("{dst_qualifier}.{table}");
+        let Some(src_cols) = describe_duckdb_table(&conn, &src_table)? else {
             continue;
         };
-        let Some(dst_cols) = describe_duckdb_table(&conn, &format!("dst_lake.{table}"))? else {
-            bail!("destination table dst_lake.{table} does not exist");
+        let Some(dst_cols) = describe_duckdb_table(&conn, &dst_table)? else {
+            bail!("destination table {dst_table} does not exist");
         };
 
         let src_rows: i64 = conn.query_row(
-            &sql_templates::render_table_count_sql("src_lake", table),
+            &sql_templates::render_table_count_sql(&src_qualifier, table),
             [],
             |r| r.get(0),
         )?;
         let dst_rows_before: i64 = conn.query_row(
-            &sql_templates::render_table_count_sql("dst_lake", table),
+            &sql_templates::render_table_count_sql(&dst_qualifier, table),
             [],
             |r| r.get(0),
         )?;
@@ -451,8 +457,9 @@ pub fn migrate_ducklake_tables(
             .iter()
             .any(|(name, _)| name.eq_ignore_ascii_case("timestamp"));
         if has_timestamp && src_rows > 50_000 {
-            let mut day_stmt =
-                conn.prepare(&sql_templates::render_ducklake_distinct_days_sql(table))?;
+            let mut day_stmt = conn.prepare(&sql_templates::render_ducklake_distinct_days_sql(
+                &src_table,
+            ))?;
             let mut day_rows = day_stmt.query([])?;
             let mut days = Vec::new();
             while let Some(row) = day_rows.next()? {
@@ -463,7 +470,7 @@ pub fn migrate_ducklake_tables(
             for day in days {
                 let day_start = format!("{day}T00:00:00Z");
                 let dst_day_count: i64 = conn.query_row(
-                    &sql_templates::render_ducklake_day_count_sql(table, &day_start),
+                    &sql_templates::render_ducklake_day_count_sql(&dst_table, &day_start),
                     [],
                     |r| r.get(0),
                 )?;
@@ -474,7 +481,8 @@ pub fn migrate_ducklake_tables(
 
                 info!(table = %table, day = %day, dst_day_count, "Migrating DuckLake day partition");
                 conn.execute_batch(&sql_templates::render_ducklake_insert_day_sql(
-                    table,
+                    &src_table,
+                    &dst_table,
                     &insert_cols_sql,
                     &select_exprs_sql,
                     &day_start,
@@ -484,7 +492,8 @@ pub fn migrate_ducklake_tables(
             }
         } else if dst_rows_before == 0 {
             conn.execute_batch(&sql_templates::render_ducklake_insert_all_sql(
-                table,
+                &src_table,
+                &dst_table,
                 &insert_cols_sql,
                 &select_exprs_sql,
             ))
@@ -492,7 +501,7 @@ pub fn migrate_ducklake_tables(
         }
 
         let dst_rows_after: i64 = conn.query_row(
-            &sql_templates::render_table_count_sql("dst_lake", table),
+            &sql_templates::render_table_count_sql(&dst_qualifier, table),
             [],
             |r| r.get(0),
         )?;
@@ -603,5 +612,66 @@ mod tests {
         assert_eq!(count, 1);
         assert_eq!(method, "GET");
         assert_eq!(service, "travel-ota");
+    }
+
+    #[test]
+    fn schema_qualified_duckdb_tables_describe_and_dedup_insert() {
+        let conn = Connection::open_in_memory().expect("duckdb");
+        conn.execute_batch(
+            "ATTACH ':memory:' AS src_lake;
+             ATTACH ':memory:' AS dst_lake;
+             CREATE SCHEMA src_lake.thelake_staging;
+             CREATE SCHEMA dst_lake.thelake_staging_ducklake11;
+             CREATE TABLE src_lake.thelake_staging.traces (
+                trace_id VARCHAR,
+                span_id VARCHAR,
+                timestamp TIMESTAMP_NS,
+                attributes MAP(VARCHAR, VARCHAR)
+             );
+             CREATE TABLE dst_lake.thelake_staging_ducklake11.traces (
+                trace_id VARCHAR,
+                span_id VARCHAR,
+                timestamp TIMESTAMP_NS,
+                attributes VARIANT
+             );
+             INSERT INTO src_lake.thelake_staging.traces VALUES
+                ('t1', 's1', '2026-11-16T10:00:00Z'::TIMESTAMPTZ::TIMESTAMP_NS, MAP {'a': '1'}),
+                ('t2', 's2', '2026-11-16T11:00:00Z'::TIMESTAMPTZ::TIMESTAMP_NS, MAP {});
+             INSERT INTO dst_lake.thelake_staging_ducklake11.traces VALUES
+                ('t1', 's1', '2026-11-16T10:00:00Z'::TIMESTAMPTZ::TIMESTAMP_NS, '{\"a\":\"1\"}'::VARIANT);",
+        )
+        .expect("seed attached schemas");
+
+        let src_table = "src_lake.thelake_staging.traces";
+        let dst_table = "dst_lake.thelake_staging_ducklake11.traces";
+        let src_cols = describe_duckdb_table(&conn, src_table).unwrap().unwrap();
+        let dst_cols = describe_duckdb_table(&conn, dst_table).unwrap().unwrap();
+        assert!(
+            describe_duckdb_table(&conn, "src_lake.thelake_staging.missing")
+                .unwrap()
+                .is_none()
+        );
+
+        let (insert_cols, select_exprs) =
+            build_column_projection("traces", &src_cols, &dst_cols).expect("projection");
+        let day_start = "2026-11-16T00:00:00Z";
+        let sql = sql_templates::render_ducklake_insert_day_sql(
+            src_table,
+            dst_table,
+            &insert_cols.join(", "),
+            &select_exprs.join(", "),
+            day_start,
+            true,
+        );
+        conn.execute_batch(&sql).expect("dedup day insert");
+
+        let dst_count: i64 = conn
+            .query_row(
+                &sql_templates::render_ducklake_day_count_sql(dst_table, day_start),
+                [],
+                |r| r.get(0),
+            )
+            .expect("count dst");
+        assert_eq!(dst_count, 2);
     }
 }
