@@ -119,3 +119,50 @@ def test_migrate_table_partitions_preserves_post_until_live_rows() -> None:
     assert rows_d == 1
     dst_rows_after = conn.execute(ml.load_sql("test_select_dst_traces.sql")).fetchall()
     assert dst_rows_after == [("live_1", "live"), ("t1", "v1"), ("t2", "v2")]
+
+
+def test_parse_args_guards_src_auto_migrate_without_clone() -> None:
+    base_args = [
+        "--pg-dsn",
+        "host=localhost dbname=test",
+        "--src-schema",
+        "thelake",
+        "--src-data-path",
+        "/tmp/a",
+        "--dst-schema",
+        "thelake_v2",
+        "--dst-data-path",
+        "/tmp/b",
+        "--src-auto-migrate",
+    ]
+    with pytest.raises(SystemExit):
+        ml.parse_args(base_args)
+
+    cfg = ml.parse_args([*base_args, "--clone-src-schema", "thelake_mig_src"])
+    assert cfg.clone_src_schema == "thelake_mig_src"
+    assert cfg.src_auto_migrate is True
+
+
+def test_migrate_table_partitions_with_attached_named_schemas() -> None:
+    conn = duckdb.connect(":memory:")
+    conn.execute(ml.load_sql("test_seed_attached_schemas.sql"))
+
+    cfg = ml.MigrationConfig(
+        pg_dsn="unused",
+        src_schema="thelake",
+        src_data_path="/tmp/src",
+        dst_schema="thelake_v2",
+        dst_data_path="/tmp/dst",
+        migration_id="test",
+    )
+    parts, rows = ml.migrate_table_partitions(
+        conn, None, cfg, "src_lake.thelake", "dst_lake.thelake_v2", "traces"
+    )
+    assert parts == 1
+    assert rows == 2
+    assert ml._describe_table(conn, "src_lake.thelake", "missing") is None
+
+    dst_rows = conn.execute(
+        ml.load_sql("test_select_attached_dst_traces.sql")
+    ).fetchall()
+    assert dst_rows == [("t1", "v"), ("t2", None)]
