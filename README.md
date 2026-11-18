@@ -12,21 +12,24 @@
   <a href="https://thelake.softprobe.ai/">thelake.softprobe.ai</a>
 </p>
 
-> **Open source AI evidence lake on DuckDB.** thelake preserves production AI
-> traces and recordings as customer-controlled data assets — durable, SQL
-> queryable, and reusable across investigation, evaluation, regression,
-> governance, and continuous improvement.
+> **End-to-end session tracing with full payloads on DuckDB.** thelake preserves
+> complete production AI and application sessions — every trace, span, prompt,
+> tool call, and HTTP body — as customer-controlled Parquet data assets in
+> DuckLake.
 
 Rust service for authenticated OTLP ingestion, workspace-scoped DuckLake
 storage, DuckDB queries, and telemetry search. Softprobe builds hosted
 products on thelake; this repository is the open-source runtime.
 
-Traditional software telemetry is often retained only for a short incident
-window. AI traces have lasting value: today's production recording can become
-tomorrow's evaluation case, regression test, audit evidence, or improvement
-dataset. thelake keeps that evidence open and durable. Flexible attributes
-live in DuckLake `MAP` columns; workspace-scoped column promotion adds typed
-query paths without discarding the original context.
+Traditional observability platforms optimize for sampled real-time monitoring
+over short incident windows, which forces teams to drop or truncate large
+payloads. thelake is built for **end-to-end session tracing with full
+payloads**: traces are stored in Zstd-compressed Parquet sorted by
+`session_id, timestamp, trace_id` so complete multi-turn AI and web sessions
+stay durable, fast to reconstruct, and economical to retain for evaluation,
+regression testing, and audit. Flexible attributes live in DuckLake `MAP`
+columns; workspace-scoped column promotion adds typed query paths without
+discarding the original context.
 
 Product goals: [`docs/architecture/goals.md`](docs/architecture/goals.md).
 Architecture: [`docs/architecture/overview.md`](docs/architecture/overview.md).

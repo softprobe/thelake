@@ -3,20 +3,20 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>thelake — Open Source AI Evidence Lake on DuckDB</title>
-  <meta name="description" content="thelake is the open source LangSmith / Datadog alternative built on DuckDB — designed for long-term storage of large full payloads at 200x lower cost than traditional observability platforms." />
+  <title>thelake — End-to-End Session Tracing with Full Payloads on DuckDB</title>
+  <meta name="description" content="thelake is an open source AI and application evidence lake on DuckDB, built for end-to-end session tracing with full payloads at low long-term storage cost." />
   <meta name="theme-color" content="#F7F7F4" />
   <link rel="canonical" href="https://thelake.softprobe.ai/" />
   <meta property="og:type" content="website" />
   <meta property="og:site_name" content="thelake" />
-  <meta property="og:title" content="thelake — Open Source AI Evidence Lake on DuckDB" />
-  <meta property="og:description" content="200x cheaper long-term storage for full AI payloads. The open source LangSmith / Datadog alternative built on DuckDB." />
+  <meta property="og:title" content="thelake — End-to-End Session Tracing with Full Payloads on DuckDB" />
+  <meta property="og:description" content="End-to-end session tracing with full payloads on DuckDB and DuckLake. Cost-effective long-term storage for AI and application sessions." />
   <meta property="og:url" content="https://thelake.softprobe.ai/" />
   <meta property="og:image" content="https://thelake.softprobe.ai/assets/og-image.png" />
-  <meta property="og:image:alt" content="thelake — open source AI evidence lake on DuckDB" />
+  <meta property="og:image:alt" content="thelake — end-to-end session tracing with full payloads on DuckDB" />
   <meta name="twitter:card" content="summary_large_image" />
-  <meta name="twitter:title" content="thelake — Open Source AI Evidence Lake on DuckDB" />
-  <meta name="twitter:description" content="200x cheaper long-term storage for full AI payloads. The open source LangSmith / Datadog alternative built on DuckDB." />
+  <meta name="twitter:title" content="thelake — End-to-End Session Tracing with Full Payloads on DuckDB" />
+  <meta name="twitter:description" content="End-to-end session tracing with full payloads on DuckDB and DuckLake. Cost-effective long-term storage for AI and application sessions." />
   <meta name="twitter:image" content="https://thelake.softprobe.ai/assets/og-image.png" />
   <script type="application/ld+json">
   {
@@ -28,7 +28,7 @@
     "license": "https://www.apache.org/licenses/LICENSE-2.0",
     "url": "https://thelake.softprobe.ai/",
     "codeRepository": "https://github.com/softprobe/thelake",
-    "description": "Open source AI evidence lake on DuckDB for long-term storage of large full payloads at ~200x lower cost than traditional observability platforms.",
+    "description": "Open source AI and application evidence lake on DuckDB, built for end-to-end session tracing with full payloads at low long-term storage cost.",
     "offers": {
       "@type": "Offer",
       "price": "0",
@@ -92,8 +92,8 @@
           <img class="hero-mark" src="/assets/logos/thelake.svg" width="96" height="96" alt="" />
           <h1 id="brand-hero">thelake</h1>
         </div>
-        <p class="slogan">The Open Source LangSmith / Datadog Alternative Built on DuckDB.</p>
-        <p class="lede">Built for long-term storage of large full payloads — 200x cheaper than traditional observability platforms.</p>
+        <p class="slogan">End-to-End Session Tracing with Full Payloads on DuckDB.</p>
+        <p class="lede">Built for complete AI and application sessions with full HTTP and LLM payloads — durable, session-sorted Parquet at low long-term cost.</p>
         <div class="cta">
           <a class="btn btn-primary" href="https://github.com/softprobe/thelake">Star on GitHub</a>
           <a class="btn btn-ghost" href="/swagger">API docs</a>
@@ -107,8 +107,8 @@
     <section class="band" aria-labelledby="why-title">
       <div class="rail">
         <p class="eyebrow">Why thelake</p>
-        <h2 id="why-title">Keep the full payload. Drop the indexing tax.</h2>
-        <p class="section-lede">Traditional observability platforms charge you to index everything, then force sampling and short retention. thelake keeps large prompts, responses, tool I/O, and HTTP bodies as open Parquet in a DuckLake — designed so long-term full-fidelity storage stays economical.</p>
+        <h2 id="why-title">End-to-end sessions. Full payloads. No indexing tax.</h2>
+        <p class="section-lede">Traditional observability platforms target real-time APM monitoring, forcing sampling, short retention, and truncated bodies. thelake is built for end-to-end session tracing with full payloads: prompts, tool I/O, and HTTP bodies stay connected by session in Zstd Parquet on DuckLake.</p>
 
         <div class="compare" role="group" aria-label="Traditional observability versus thelake">
           <article class="compare-pane">
@@ -186,7 +186,7 @@
                 <text x="318" y="227" class="viz-on-dark">outcome</text>
               </svg>
             </figure>
-            <p>Storage-first economics on object-store Parquet. Retain complete AI and application payloads for years, then query them with DuckDB SQL when you need them.</p>
+            <p>Storage-first economics on session-sorted Parquet. Retain complete end-to-end AI and application sessions with full payloads for years, then reconstruct and query them with DuckDB SQL.</p>
           </article>
         </div>
       </div>
@@ -195,13 +195,13 @@
     <section class="band band-tint" aria-labelledby="pillars-title">
       <div class="rail">
         <p class="eyebrow">What you get</p>
-        <h2 id="pillars-title">Full payloads. Long retention. Open SQL.</h2>
-        <p class="section-lede">Architecture aimed at 200x lower long-term cost than index-heavy observability stacks — without discarding the bodies you need later.</p>
+        <h2 id="pillars-title">End-to-end sessions. Full payloads. Open SQL.</h2>
+        <p class="section-lede">Purpose-built for durable session evidence rather than sampled real-time monitoring, without discarding the bodies you need later.</p>
         <ol class="steps">
           <li>
             <span class="step-num">01</span>
-            <h3>Full payloads, no sampling</h3>
-            <p>OTLP traces and logs into a tenant-bound runtime. Keep prompts, tool calls, HTTP bodies, and outcomes connected — not truncated for an incident window.</p>
+            <h3>End-to-end sessions with full payloads</h3>
+            <p>OTLP traces and logs into a tenant-bound runtime. Keep browser, backend, LLM prompts, tool calls, and HTTP bodies connected by session — never truncated.</p>
           </li>
           <li>
             <span class="step-num">02</span>
