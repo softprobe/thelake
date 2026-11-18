@@ -151,8 +151,10 @@ mod tests {
         let html = embedded_utf8("index.html");
         assert!(html.contains("thelake"));
         assert!(html.contains("make run"));
-        assert!(html.contains("200x cheaper"));
-        assert!(html.contains("long-term storage"));
+        assert!(html.contains("End-to-end session tracing with full payloads"));
+        assert!(html.contains("DuckDB and DuckLake"));
+        assert!(html.contains("evidence lake"));
+        assert!(!html.contains("200x"));
         assert!(html.contains("https://www.softprobe.ai/"));
         assert!(html.contains("https://github.com/softprobe/thelake"));
         assert!(html.contains("/swagger"));
@@ -280,7 +282,9 @@ mod tests {
         assert!(llms.contains("https://thelake.softprobe.ai/"));
         assert!(llms.contains("https://github.com/softprobe/thelake"));
         assert!(llms.contains("DuckDB"));
-        assert!(llms.contains("200x"));
+        assert!(llms.contains("DuckLake"));
+        assert!(llms.contains("evidence lake"));
+        assert!(llms.contains("End-to-end session tracing with full payloads"));
         assert!(llms.contains("make run"));
 
         assert!(

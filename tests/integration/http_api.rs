@@ -213,8 +213,10 @@ async fn landing_page_is_served_at_root_without_shadowing_health() {
     let html = String::from_utf8(body.to_vec()).expect("utf8");
     assert!(html.contains("thelake"));
     assert!(html.contains("make run"));
-    assert!(html.contains("200x cheaper"));
-    assert!(html.contains("long-term storage"));
+    assert!(html.contains("End-to-end session tracing with full payloads"));
+    assert!(html.contains("DuckDB and DuckLake"));
+    assert!(html.contains("evidence lake"));
+    assert!(!html.contains("200x"));
     assert!(html.contains("https://www.softprobe.ai/"));
     assert!(html.contains("/styles.css"));
     assert!(html.contains("/script.js"));
