@@ -6,7 +6,11 @@ use axum::{
     response::Response,
 };
 
-fn authorize_agent_assertion_request(
+fn is_ingest_route(method: &Method, path: &str) -> bool {
+    *method == Method::POST && matches!(path, "/v1/traces" | "/v1/logs" | "/v1/scores")
+}
+
+pub(crate) fn authorize_agent_assertion_request(
     claims: &crate::softprobe_assertion::SoftprobeAssertionClaims,
     method: &Method,
     path: &str,
@@ -29,10 +33,8 @@ fn authorize_agent_assertion_request(
         .capabilities
         .as_ref()
         .is_some_and(|capabilities| capabilities.iter().any(|capability| capability == "ingest"));
-    let is_ingest_route =
-        *method == Method::POST && matches!(path, "/v1/traces" | "/v1/logs" | "/v1/scores");
 
-    if has_ingest_capability && is_ingest_route {
+    if has_ingest_capability && is_ingest_route(method, path) {
         Ok(())
     } else {
         Err(StatusCode::FORBIDDEN)
@@ -97,11 +99,28 @@ pub async fn runtime_auth_middleware(
         }
     }
 
-    // Explorer's opaque API keys are resolved by the gateway and are never
-    // valid direct-to-TheLake bearer credentials. Do not let them reach the
-    // legacy default-workspace fallback, which cannot verify their owner.
     if token.starts_with("spk_") {
-        return Err(StatusCode::UNAUTHORIZED);
+        if !crate::softprobe_assertion::is_ingest_key_resolve_configured() {
+            return Err(StatusCode::UNAUTHORIZED);
+        }
+        if !is_ingest_route(req.method(), path) {
+            return Err(StatusCode::FORBIDDEN);
+        }
+        let claims = crate::softprobe_assertion::resolve_ingest_key(&token)
+            .await
+            .map_err(|err| match err {
+                crate::softprobe_assertion::IngestKeyResolveError::Unauthorized
+                | crate::softprobe_assertion::IngestKeyResolveError::Unconfigured => {
+                    StatusCode::UNAUTHORIZED
+                }
+                crate::softprobe_assertion::IngestKeyResolveError::Upstream(_) => {
+                    StatusCode::BAD_GATEWAY
+                }
+            })?;
+        authorize_agent_assertion_request(&claims, req.method(), path)?;
+        let info = crate::softprobe_assertion::workspace_auth_from_assertion(&claims)
+            .map_err(|_| StatusCode::FORBIDDEN)?;
+        return Ok(run_workspace_request(req, next, info).await);
     }
 
     // Legacy direct-to-thelake clients: no assertion header. Optional default
@@ -313,12 +332,16 @@ mod tests {
             "SOFTPROBE_DEFAULT_WORKSPACE_ID",
             "THELAKE_DEFAULT_WORKSPACE_ID",
             "SOFTPROBE_ADMIN_API_KEY",
+            "SOFTPROBE_INGEST_KEY_RESOLVE_URL",
+            "SOFTPROBE_EXPLORER_URL",
         ]);
         std::env::remove_var("SOFTPROBE_ASSERTION_HMAC_SECRET");
         std::env::set_var("ASSERTION_HMAC_SECRET", TEST_SECRET);
         std::env::set_var("SOFTPROBE_DEFAULT_WORKSPACE_ID", TEST_WORKSPACE);
         std::env::remove_var("THELAKE_DEFAULT_WORKSPACE_ID");
         std::env::set_var("SOFTPROBE_ADMIN_API_KEY", "test-admin-key");
+        std::env::remove_var("SOFTPROBE_INGEST_KEY_RESOLVE_URL");
+        std::env::remove_var("SOFTPROBE_EXPLORER_URL");
         snapshot
     }
 
@@ -753,5 +776,105 @@ mod tests {
         assert!(!crate::self_monitoring::is_reserved_workspace_id(
             "softprobe-local"
         ));
+    }
+
+    #[tokio::test]
+    async fn middleware_resolves_spk_via_explorer_with_cache_and_enforces_ingest_routes() {
+        let _env_lock = crate::softprobe_assertion::AUTH_ENV_TEST_LOCK.lock().await;
+        let _env = configure_auth_environment();
+
+        let server = wiremock::MockServer::start().await;
+        std::env::set_var("SOFTPROBE_EXPLORER_URL", server.uri());
+
+        let resolved_jwt = signed_assertion(
+            TEST_SECRET,
+            TEST_WORKSPACE,
+            Some("agent-resolved"),
+            Some(&["ingest"]),
+        );
+
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/api/internal/ingest-key/resolve"))
+            .and(wiremock::matchers::header_exists("x-softprobe-assertion"))
+            .and(wiremock::matchers::body_json(serde_json::json!({
+                "apiKey": "spk_live_wiremock_valid"
+            })))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({ "assertion": resolved_jwt })),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/api/internal/ingest-key/resolve"))
+            .and(wiremock::matchers::body_json(serde_json::json!({
+                "apiKey": "spk_live_wiremock_unknown"
+            })))
+            .respond_with(wiremock::ResponseTemplate::new(401))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let app = middleware_test_router();
+
+        // First POST /v1/traces resolves via Explorer and carries agent_id.
+        let resp1 = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method(Method::POST)
+                    .uri("/v1/traces")
+                    .header("authorization", "Bearer spk_live_wiremock_valid")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp1.status(), StatusCode::NO_CONTENT);
+        assert_eq!(resp1.headers()["x-test-agent-id"], "agent-resolved");
+
+        // Second POST /v1/traces hits the 60s TTL cache (wiremock expect(1) verifies no second HTTP call).
+        let resp2 = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method(Method::POST)
+                    .uri("/v1/traces")
+                    .header("authorization", "Bearer spk_live_wiremock_valid")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp2.status(), StatusCode::NO_CONTENT);
+        assert_eq!(resp2.headers()["x-test-agent-id"], "agent-resolved");
+
+        // Unknown spk_ -> 401 UNAUTHORIZED.
+        assert_eq!(
+            response_status(
+                app.clone(),
+                Method::POST,
+                "/v1/traces",
+                &[("authorization", "Bearer spk_live_wiremock_unknown")],
+                None,
+            )
+            .await,
+            StatusCode::UNAUTHORIZED
+        );
+
+        // Non-ingest route with spk_ -> 403 FORBIDDEN.
+        assert_eq!(
+            response_status(
+                app,
+                Method::POST,
+                "/v1/sessions/search",
+                &[("authorization", "Bearer spk_live_wiremock_valid")],
+                Some("{}"),
+            )
+            .await,
+            StatusCode::FORBIDDEN
+        );
     }
 }

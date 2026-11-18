@@ -8,7 +8,7 @@ use anyhow::{anyhow, bail, Result};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use hmac::{Hmac, Mac};
 use serde::Deserialize;
-use sha2::Sha256;
+use sha2::{Digest, Sha256};
 
 pub const ASSERTION_HEADER: &str = "x-softprobe-assertion";
 pub const DEFAULT_ISS: &str = "softprobe-edge";
@@ -67,6 +67,138 @@ pub fn assertion_hmac_secret() -> Option<String> {
         }
     }
     None
+}
+
+pub fn ingest_key_resolve_url() -> Option<String> {
+    if let Ok(raw) = std::env::var("SOFTPROBE_INGEST_KEY_RESOLVE_URL") {
+        let trimmed = raw.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
+        }
+    }
+    if let Ok(base) = std::env::var("SOFTPROBE_EXPLORER_URL") {
+        let trimmed = base.trim().trim_end_matches('/');
+        if !trimmed.is_empty() {
+            return Some(format!("{trimmed}/api/internal/ingest-key/resolve"));
+        }
+    }
+    None
+}
+
+pub fn is_ingest_key_resolve_configured() -> bool {
+    ingest_key_resolve_url().is_some() && assertion_hmac_secret().is_some()
+}
+
+pub fn mint_resolve_ingest_key_assertion(secret: &str, now_sec: i64) -> Result<String> {
+    let header = URL_SAFE_NO_PAD.encode(br#"{"alg":"HS256","typ":"JWT"}"#);
+    let payload = serde_json::json!({
+        "iss": "softprobe-thelake",
+        "aud": "sp-explorer",
+        "sub": "thelake-server",
+        "workspace_id": "00000000-0000-0000-0000-000000000000",
+        "capabilities": ["resolve_ingest_key"],
+        "exp": now_sec + 60,
+    });
+    let payload_b64 = URL_SAFE_NO_PAD.encode(payload.to_string().as_bytes());
+    let signing_input = format!("{header}.{payload_b64}");
+    let mut mac = HmacSha256::new_from_slice(secret.as_bytes())
+        .map_err(|_| anyhow!("assertion: invalid hmac key"))?;
+    mac.update(signing_input.as_bytes());
+    let sig = URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes());
+    Ok(format!("{signing_input}.{sig}"))
+}
+
+#[derive(Debug, Clone)]
+pub enum IngestKeyResolveError {
+    Unconfigured,
+    Unauthorized,
+    Upstream(String),
+}
+
+static INGEST_KEY_CACHE: std::sync::OnceLock<
+    dashmap::DashMap<[u8; 32], (SoftprobeAssertionClaims, std::time::Instant)>,
+> = std::sync::OnceLock::new();
+static INGEST_KEY_HTTP_CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+
+fn ingest_key_cache(
+) -> &'static dashmap::DashMap<[u8; 32], (SoftprobeAssertionClaims, std::time::Instant)> {
+    INGEST_KEY_CACHE.get_or_init(dashmap::DashMap::new)
+}
+
+fn ingest_key_http_client() -> &'static reqwest::Client {
+    INGEST_KEY_HTTP_CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(5))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new())
+    })
+}
+
+#[derive(Deserialize)]
+struct IngestKeyResolveResponse {
+    assertion: String,
+}
+
+pub async fn resolve_ingest_key(
+    token: &str,
+) -> std::result::Result<SoftprobeAssertionClaims, IngestKeyResolveError> {
+    let resolve_url = ingest_key_resolve_url().ok_or(IngestKeyResolveError::Unconfigured)?;
+    let secret = assertion_hmac_secret().ok_or(IngestKeyResolveError::Unconfigured)?;
+
+    let cache_key: [u8; 32] = Sha256::digest(token.as_bytes()).into();
+    let now_instant = std::time::Instant::now();
+    let now_sec = chrono::Utc::now().timestamp();
+    if let Some(entry) = ingest_key_cache().get(&cache_key) {
+        if now_instant < entry.1 && entry.0.exp.map_or(true, |exp| exp >= now_sec) {
+            return Ok(entry.0.clone());
+        }
+    }
+
+    let service_jwt = mint_resolve_ingest_key_assertion(&secret, now_sec)
+        .map_err(|e| IngestKeyResolveError::Upstream(e.to_string()))?;
+
+    let resp = ingest_key_http_client()
+        .post(&resolve_url)
+        .header(ASSERTION_HEADER, service_jwt)
+        .json(&serde_json::json!({ "apiKey": token }))
+        .send()
+        .await
+        .map_err(|e| IngestKeyResolveError::Upstream(format!("ingest key resolve failed: {e}")))?;
+
+    let status = resp.status();
+    if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
+        return Err(IngestKeyResolveError::Unauthorized);
+    }
+    if !status.is_success() {
+        return Err(IngestKeyResolveError::Upstream(format!(
+            "ingest key resolution returned status {status}"
+        )));
+    }
+
+    let payload: IngestKeyResolveResponse = resp
+        .json()
+        .await
+        .map_err(|_| IngestKeyResolveError::Unauthorized)?;
+    if payload.assertion.trim().is_empty() {
+        return Err(IngestKeyResolveError::Unauthorized);
+    }
+
+    let claims = verify_softprobe_assertion(&payload.assertion, &secret, now_sec)
+        .map_err(|_| IngestKeyResolveError::Unauthorized)?;
+
+    let mut ttl = std::time::Duration::from_secs(60);
+    if let Some(exp) = claims.exp {
+        let remaining = exp.saturating_sub(now_sec);
+        if remaining <= 0 {
+            return Ok(claims);
+        }
+        ttl = ttl.min(std::time::Duration::from_secs(remaining as u64));
+    }
+    if !ttl.is_zero() {
+        ingest_key_cache().insert(cache_key, (claims.clone(), std::time::Instant::now() + ttl));
+    }
+
+    Ok(claims)
 }
 
 pub fn verify_softprobe_assertion(

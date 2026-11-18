@@ -8,7 +8,9 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -202,5 +204,115 @@ func TestSoftprobeAuthRoundTripperFailsClosedAndOmitsEmptyHeaders(t *testing.T) 
 	}
 	if _, hasAuthz := captured["Authorization"]; hasAuthz {
 		t.Fatalf("must not emit empty Authorization header, got %v", captured["Authorization"])
+	}
+}
+
+func TestParseInboundResolvesSpkViaExplorerAndCaches(t *testing.T) {
+	now := time.Unix(1_750_000_000, 0)
+	expectedAssertion := mintJWT(t, testSecret, map[string]any{
+		"iss":          "softprobe-edge",
+		"aud":          "sp-backend",
+		"sub":          "agent-key",
+		"workspace_id": testWS1,
+		"agent_id":     "agent-ota",
+		"capabilities": []string{"ingest"},
+		"exp":          now.Unix() + 120,
+	})
+
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		if r.URL.Path != "/api/internal/ingest-key/resolve" {
+			t.Errorf("unexpected path: %s", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		if r.Method != http.MethodPost {
+			t.Errorf("unexpected method: %s", r.Method)
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		svcJWT := r.Header.Get("X-Softprobe-Assertion")
+		parts := strings.Split(svcJWT, ".")
+		if len(parts) != 3 {
+			t.Errorf("missing or malformed X-Softprobe-Assertion: %q", svcJWT)
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		payloadBytes, err := base64.RawURLEncoding.DecodeString(parts[1])
+		if err != nil {
+			t.Errorf("decode service jwt payload: %v", err)
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		var svcClaims struct {
+			Iss          string   `json:"iss"`
+			Aud          string   `json:"aud"`
+			Sub          string   `json:"sub"`
+			WorkspaceID  string   `json:"workspace_id"`
+			Capabilities []string `json:"capabilities"`
+		}
+		if err := json.Unmarshal(payloadBytes, &svcClaims); err != nil {
+			t.Errorf("unmarshal service claims: %v", err)
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		if svcClaims.Iss != "softprobe-thelake" || svcClaims.Aud != "sp-explorer" ||
+			svcClaims.Sub != "thelake-collector" ||
+			svcClaims.WorkspaceID != "00000000-0000-0000-0000-000000000000" ||
+			len(svcClaims.Capabilities) != 1 || svcClaims.Capabilities[0] != "resolve_ingest_key" {
+			t.Errorf("unexpected service claims: %+v", svcClaims)
+			w.WriteHeader(http.StatusForbidden)
+			return
+		}
+
+		var body struct {
+			APIKey string `json:"apiKey"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Errorf("decode body: %v", err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		switch body.APIKey {
+		case "spk_live_valid":
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]string{"assertion": expectedAssertion})
+		default:
+			w.WriteHeader(http.StatusUnauthorized)
+		}
+	}))
+	defer srv.Close()
+
+	t.Setenv("SOFTPROBE_INGEST_KEY_RESOLVE_URL", "")
+	t.Setenv("SOFTPROBE_EXPLORER_URL", srv.URL)
+	verifier := NewVerifier(testSecret)
+
+	md := client.NewMetadata(map[string][]string{HeaderAuthz: {"Bearer spk_live_valid"}})
+	env1, err := ParseInbound(md, verifier, now)
+	if err != nil {
+		t.Fatalf("first spk_ ParseInbound failed: %v", err)
+	}
+	if env1.Assertion != expectedAssertion {
+		t.Fatalf("expected resolved assertion, got %q", env1.Assertion)
+	}
+	if env1.Scope.Kind != ScopeAssertion || env1.Scope.WorkspaceID != testWS1 || env1.Scope.AgentID != "agent-ota" {
+		t.Fatalf("unexpected resolved scope: %+v", env1.Scope)
+	}
+
+	env2, err := ParseInbound(md, verifier, now.Add(30*time.Second))
+	if err != nil {
+		t.Fatalf("cached spk_ ParseInbound failed: %v", err)
+	}
+	if env2 != env1 {
+		t.Fatalf("expected cached AuthEnvelope to match first response")
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("expected Explorer resolve endpoint to be called once due to cache, got %d", got)
+	}
+
+	badMD := client.NewMetadata(map[string][]string{HeaderAuthz: {"Bearer spk_live_unknown"}})
+	if _, err := ParseInbound(badMD, verifier, now); status.Code(err) != codes.Unauthenticated {
+		t.Fatalf("expected Unauthenticated for rejected spk_, got %v", err)
 	}
 }
