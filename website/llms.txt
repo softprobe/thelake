@@ -1,15 +1,15 @@
 # thelake
 
-> Open source end-to-end session tracing with full payloads, built on DuckDB and DuckLake. Cost-effective long-term storage for complete AI and application sessions.
+> Cost-effective long-term AI and application evidence lake. End-to-end session tracing with full payloads, built on DuckDB and DuckLake.
 
-thelake is an Apache-2.0 Rust runtime: OTLP traces and logs in; DuckLake + Zstd Parquet sorted by `session_id` on object store or disk; DuckDB SQL and Grafana-compatible Loki/Tempo query APIs out. Instead of sampled real-time APM monitoring, thelake preserves every turn, span, prompt, tool call, and HTTP body in a session for investigation, evaluation, and regression testing. Softprobe Agent QA is built on thelake.
+thelake is an Apache-2.0 Rust runtime: OTLP traces and logs in; DuckLake + Zstd Parquet sorted by `session_id` on object store or disk; DuckDB SQL and Grafana-compatible Loki/Tempo query APIs out. Instead of sampled real-time APM monitoring, thelake preserves every turn, span, prompt, tool call, and HTTP body in a session for investigation, evaluation, and regression testing. Softprobe Blackbox is built on thelake.
 
 ## Site
 
 - [Landing](https://thelake.softprobe.ai/): Product positioning, architecture overview, quick start
 - [API docs (Swagger)](https://thelake.softprobe.ai/swagger): HTTP API reference
 - [GitHub](https://github.com/softprobe/thelake): Source, README, License.txt
-- [Softprobe](https://www.softprobe.ai/): Commercial Agent QA product powered by thelake
+- [Softprobe](https://www.softprobe.ai/): Commercial Blackbox product powered by thelake
 
 ## Optional
 
