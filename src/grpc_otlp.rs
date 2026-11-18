@@ -58,11 +58,10 @@ impl TraceService for GrpcTraceService {
             crate::softprobe_assertion::workspace_auth_from_assertion(&claims)
                 .map_err(|_| Status::permission_denied("invalid workspace_id in assertion"))?
         } else {
-            let control_plane = self
-                .state
-                .workspaces
-                .control_plane()
-                .ok_or_else(|| Status::internal("gRPC ingest requires control-plane runtime"))?;
+            let control_plane =
+                self.state.workspaces.control_plane().ok_or_else(|| {
+                    Status::internal("gRPC ingest requires control-plane runtime")
+                })?;
             control_plane
                 .resolver
                 .resolve(&token)
