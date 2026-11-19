@@ -149,7 +149,7 @@ pub async fn resolve_ingest_key(
     let now_instant = std::time::Instant::now();
     let now_sec = chrono::Utc::now().timestamp();
     if let Some(entry) = ingest_key_cache().get(&cache_key) {
-        if now_instant < entry.1 && entry.0.exp.map_or(true, |exp| exp >= now_sec) {
+        if now_instant < entry.1 && entry.0.exp.is_none_or(|exp| exp >= now_sec) {
             return Ok(entry.0.clone());
         }
     }
