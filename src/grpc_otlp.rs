@@ -35,16 +35,39 @@ impl TraceService for GrpcTraceService {
         let token = auth_val
             .and_then(parse_bearer)
             .ok_or_else(|| Status::unauthenticated("missing or invalid authorization metadata"))?;
-        let control_plane = self
-            .state
-            .workspaces
-            .control_plane()
-            .ok_or_else(|| Status::internal("gRPC ingest requires control-plane runtime"))?;
-        let auth = control_plane
-            .resolver
-            .resolve(&token)
-            .await
-            .map_err(|_| Status::permission_denied("workspace auth resolution failed"))?;
+        let auth = if token.starts_with("spk_")
+            && crate::softprobe_assertion::is_ingest_key_resolve_configured()
+        {
+            let claims = crate::softprobe_assertion::resolve_ingest_key(&token)
+                .await
+                .map_err(|err| match err {
+                    crate::softprobe_assertion::IngestKeyResolveError::Unauthorized
+                    | crate::softprobe_assertion::IngestKeyResolveError::Unconfigured => {
+                        Status::unauthenticated("invalid ingestion key")
+                    }
+                    crate::softprobe_assertion::IngestKeyResolveError::Upstream(msg) => {
+                        Status::unavailable(msg)
+                    }
+                })?;
+            crate::api::auth::authorize_agent_assertion_request(
+                &claims,
+                &http::Method::POST,
+                "/v1/traces",
+            )
+            .map_err(|_| Status::permission_denied("agent assertion lacks ingest capability"))?;
+            crate::softprobe_assertion::workspace_auth_from_assertion(&claims)
+                .map_err(|_| Status::permission_denied("invalid workspace_id in assertion"))?
+        } else {
+            let control_plane =
+                self.state.workspaces.control_plane().ok_or_else(|| {
+                    Status::internal("gRPC ingest requires control-plane runtime")
+                })?;
+            control_plane
+                .resolver
+                .resolve(&token)
+                .await
+                .map_err(|_| Status::permission_denied("workspace auth resolution failed"))?
+        };
         process_traces(self.state.clone(), inner, body_size, Some(auth))
             .await
             .map_err(|e| {

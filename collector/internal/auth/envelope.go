@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"bytes"
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
@@ -8,7 +9,11 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
+	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"go.opentelemetry.io/collector/client"
@@ -56,20 +61,51 @@ type AuthEnvelope struct {
 	ExpiresAtUnix   int64
 }
 
+type cachedIngestAssertion struct {
+	scope      TenantScopeKey
+	assertion  string
+	expUnix    int64
+	cacheUntil time.Time
+}
+
 type Verifier struct {
-	secret []byte
+	secret           []byte
+	ingestResolveURL string
+	httpClient       *http.Client
+	cacheMu          sync.Mutex
+	ingestCache      map[[32]byte]cachedIngestAssertion
+}
+
+func resolveIngestKeyURLFromEnv() string {
+	if raw := strings.TrimSpace(os.Getenv("SOFTPROBE_INGEST_KEY_RESOLVE_URL")); raw != "" {
+		return raw
+	}
+	if base := strings.TrimSpace(os.Getenv("SOFTPROBE_EXPLORER_URL")); base != "" {
+		return strings.TrimRight(base, "/") + "/api/internal/ingest-key/resolve"
+	}
+	return ""
 }
 
 func NewVerifier(hmacSecret string) *Verifier {
 	trimmed := strings.TrimSpace(hmacSecret)
-	if trimmed == "" {
-		return &Verifier{}
+	var secret []byte
+	if trimmed != "" {
+		secret = []byte(trimmed)
 	}
-	return &Verifier{secret: []byte(trimmed)}
+	return &Verifier{
+		secret:           secret,
+		ingestResolveURL: resolveIngestKeyURLFromEnv(),
+		httpClient:       &http.Client{Timeout: 5 * time.Second},
+		ingestCache:      make(map[[32]byte]cachedIngestAssertion),
+	}
 }
 
 func (v *Verifier) HasSecret() bool {
 	return v != nil && len(v.secret) > 0
+}
+
+func (v *Verifier) canResolveIngestKeys() bool {
+	return v.HasSecret() && v.ingestResolveURL != ""
 }
 
 type rawClaims struct {
@@ -138,10 +174,23 @@ func ParseInbound(md client.Metadata, verifier *Verifier, now time.Time) (AuthEn
 	}
 
 	if strings.HasPrefix(token, "spk_") {
-		return AuthEnvelope{}, status.Error(
-			codes.Unauthenticated,
-			"Explorer API keys must be exchanged at the gateway before reaching the collector",
-		)
+		if !verifier.canResolveIngestKeys() {
+			return AuthEnvelope{}, status.Error(
+				codes.Unauthenticated,
+				"Explorer API keys must be exchanged at the gateway before reaching the collector",
+			)
+		}
+		resolved, err := resolveIngestKey(token, verifier, now)
+		if err != nil {
+			return AuthEnvelope{}, err
+		}
+		return AuthEnvelope{
+			Scope:           resolved.scope,
+			Assertion:       resolved.assertion,
+			WorkspaceHeader: wsHeader,
+			ScopeOrgID:      scopeOrg,
+			ExpiresAtUnix:   resolved.expUnix,
+		}, nil
 	}
 
 	hashInput := rawAuth + "\x00" + wsHeader + "\x00" + scopeOrg
@@ -184,6 +233,108 @@ func verifyAssertionAndScope(token string, verifier *Verifier, nowSec int64) (Te
 		return TenantScopeKey{}, 0, status.Error(codes.Unauthenticated, err.Error())
 	}
 	return authorizeClaims(claims)
+}
+
+func signServiceAssertion(secret []byte, now time.Time) (string, error) {
+	hdr := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"HS256","typ":"JWT"}`))
+	payloadBytes, err := json.Marshal(map[string]any{
+		"iss":          "softprobe-thelake",
+		"aud":          "sp-explorer",
+		"sub":          "thelake-collector",
+		"workspace_id": "00000000-0000-0000-0000-000000000000",
+		"capabilities": []string{"resolve_ingest_key"},
+		"exp":          now.Unix() + 60,
+	})
+	if err != nil {
+		return "", err
+	}
+	signingInput := hdr + "." + base64.RawURLEncoding.EncodeToString(payloadBytes)
+	mac := hmac.New(sha256.New, secret)
+	mac.Write([]byte(signingInput))
+	sig := base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
+	return signingInput + "." + sig, nil
+}
+
+func resolveIngestKey(token string, verifier *Verifier, now time.Time) (cachedIngestAssertion, error) {
+	key := sha256.Sum256([]byte(token))
+	verifier.cacheMu.Lock()
+	if entry, ok := verifier.ingestCache[key]; ok {
+		if now.Before(entry.cacheUntil) && (entry.expUnix == 0 || entry.expUnix >= now.Unix()) {
+			verifier.cacheMu.Unlock()
+			return entry, nil
+		}
+		delete(verifier.ingestCache, key)
+	}
+	verifier.cacheMu.Unlock()
+
+	serviceJWT, err := signServiceAssertion(verifier.secret, now)
+	if err != nil {
+		return cachedIngestAssertion{}, status.Errorf(codes.Internal, "failed to sign service assertion: %v", err)
+	}
+
+	reqBody, err := json.Marshal(map[string]string{"apiKey": token})
+	if err != nil {
+		return cachedIngestAssertion{}, status.Errorf(codes.Internal, "failed to marshal resolve request: %v", err)
+	}
+
+	req, err := http.NewRequest(http.MethodPost, verifier.ingestResolveURL, bytes.NewReader(reqBody))
+	if err != nil {
+		return cachedIngestAssertion{}, status.Errorf(codes.Internal, "failed to build resolve request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Softprobe-Assertion", serviceJWT)
+
+	httpClient := verifier.httpClient
+	if httpClient == nil {
+		httpClient = &http.Client{Timeout: 5 * time.Second}
+	}
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return cachedIngestAssertion{}, status.Errorf(codes.Unavailable, "ingest key resolution request failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		return cachedIngestAssertion{}, status.Error(codes.Unauthenticated, "invalid ingestion key")
+	}
+	if resp.StatusCode != http.StatusOK {
+		return cachedIngestAssertion{}, status.Errorf(codes.Unavailable, "ingest key resolution failed with status %d", resp.StatusCode)
+	}
+
+	bodyBytes, err := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
+	if err != nil {
+		return cachedIngestAssertion{}, status.Errorf(codes.Unavailable, "failed to read ingest key resolution response: %v", err)
+	}
+	var payload struct {
+		Assertion string `json:"assertion"`
+	}
+	if err := json.Unmarshal(bodyBytes, &payload); err != nil || strings.TrimSpace(payload.Assertion) == "" {
+		return cachedIngestAssertion{}, status.Error(codes.Unauthenticated, "invalid ingest key resolution response")
+	}
+
+	scope, expUnix, err := verifyAssertionAndScope(payload.Assertion, verifier, now.Unix())
+	if err != nil {
+		return cachedIngestAssertion{}, err
+	}
+
+	cacheUntil := now.Add(60 * time.Second)
+	if expUnix > 0 {
+		if expTime := time.Unix(expUnix, 0); expTime.Before(cacheUntil) {
+			cacheUntil = expTime
+		}
+	}
+	entry := cachedIngestAssertion{
+		scope:      scope,
+		assertion:  payload.Assertion,
+		expUnix:    expUnix,
+		cacheUntil: cacheUntil,
+	}
+	if cacheUntil.After(now) {
+		verifier.cacheMu.Lock()
+		verifier.ingestCache[key] = entry
+		verifier.cacheMu.Unlock()
+	}
+	return entry, nil
 }
 
 func verifyJWT(token string, secret []byte, nowSec int64) (*rawClaims, error) {
