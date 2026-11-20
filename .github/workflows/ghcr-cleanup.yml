@@ -1,0 +1,42 @@
+name: Cleanup old GHCR CI images
+
+on:
+  schedule:
+    - cron: "23 4 * * 0"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  cleanup-thelake:
+    name: Prune old thelake CI tags
+    if: github.repository == 'softprobe/thelake'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Prune sha and pr tags older than 21 days
+        uses: dataaxiom/ghcr-cleanup-action@v1
+        with:
+          package: thelake
+          delete-tags: sha-*,pr-*
+          exclude-tags: main,latest,buildcache
+          older-than: 21d
+
+  cleanup-collector:
+    name: Prune old thelake-collector CI tags
+    if: github.repository == 'softprobe/thelake'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Prune sha and pr tags older than 21 days
+        uses: dataaxiom/ghcr-cleanup-action@v1
+        with:
+          package: thelake-collector
+          delete-tags: sha-*,pr-*
+          exclude-tags: main,latest,buildcache
+          older-than: 21d

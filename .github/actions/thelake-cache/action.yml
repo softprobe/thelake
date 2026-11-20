@@ -1,5 +1,10 @@
 name: TheLake build cache
 description: Restore and save Cargo registry + target under ~/.cache/thelake.
+inputs:
+  profile:
+    description: Cargo profile cache bucket (dev or release)
+    required: false
+    default: dev
 runs:
   using: composite
   steps:
@@ -7,11 +12,13 @@ runs:
       uses: actions/cache@v4
       with:
         path: |
-          ${{ env.HOME }}/.cache/thelake/cargo
-          ${{ env.HOME }}/.cache/thelake/target
-        key: thelake-${{ runner.os }}-rust-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+          ~/.cache/thelake/cargo
+          ~/.cache/thelake/target
+        key: thelake-${{ runner.os }}-rust-${{ inputs.profile }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
         restore-keys: |
+          thelake-${{ runner.os }}-rust-${{ inputs.profile }}-
           thelake-${{ runner.os }}-rust-
+        save-always: true
 
     - name: Prepare cache directories
       shell: bash

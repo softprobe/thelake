@@ -70,6 +70,8 @@ jobs:
 
       - name: Restore build cache
         uses: ./.github/actions/thelake-cache
+        with:
+          profile: release
 
       - name: Bootstrap ubuntu runner
         uses: ./.github/actions/ubuntu-runner
@@ -86,18 +88,39 @@ jobs:
           username: softprobe
           password: ${{ secrets.DOCKER_HUB_PASSWORD }}
 
-      - name: Start local test infra
-        run: make setup
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Release gate (test-perf + build-release + publish)
+      - name: Promote verified GHCR images or fall back to source build
+        env:
+          SOURCE_SHA: ${{ github.sha }}
+          REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
+          thelake_src="ghcr.io/${REPO}:sha-${SOURCE_SHA}"
+          collector_src="ghcr.io/${REPO}-collector:sha-${SOURCE_SHA}"
+          if docker buildx imagetools inspect "${thelake_src}" >/dev/null 2>&1 && \
+             docker buildx imagetools inspect "${collector_src}" >/dev/null 2>&1; then
+            thelake_tags=(--tag "softprobe/thelake:${IMAGE_TAG}")
+            collector_tags=(--tag "softprobe/thelake-collector:${IMAGE_TAG}")
+            if [[ "${{ github.event.release.prerelease }}" != "true" ]]; then
+              thelake_tags+=(--tag "softprobe/thelake:latest")
+              collector_tags+=(--tag "softprobe/thelake-collector:latest")
+            fi
+            docker buildx imagetools create "${thelake_tags[@]}" "${thelake_src}"
+            docker buildx imagetools create "${collector_tags[@]}" "${collector_src}"
+            exit 0
+          fi
+
+          echo "GHCR CI image missing for ${SOURCE_SHA}; running full release build."
+          make setup
+          trap 'make teardown' EXIT
           if [[ "${{ github.event.release.prerelease }}" == "true" ]]; then
             make release TAG="${IMAGE_TAG}" TAG_LATEST=0
           else
             make release TAG="${IMAGE_TAG}"
           fi
-
-      - name: Teardown local infra
-        if: always()
-        run: make teardown
