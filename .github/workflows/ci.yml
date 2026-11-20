@@ -215,3 +215,184 @@ jobs:
 
       - name: Run Explorer UI E2E
         run: make test-explorer-ui
+
+  publish-ci-image:
+    name: Build and publish GHCR CI images
+    needs: ci
+    if: >-
+      github.repository == 'softprobe/thelake' &&
+      (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == 'softprobe/thelake')
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      target_sha: ${{ steps.vars.outputs.target_sha }}
+    env:
+      CI: "true"
+      CARGO_INCREMENTAL: "0"
+      DUCKDB_DOWNLOAD_LIB: "1"
+
+    steps:
+      - name: Pre-clean workspace permissions
+        run: |
+          set -euo pipefail
+          WS="${GITHUB_WORKSPACE:-$PWD}"
+          if [[ -d "$WS" ]]; then
+            sudo rm -rf "$WS/warehouse" || true
+            sudo chown -R "$(id -u):$(id -g)" "$WS" || true
+          fi
+
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+
+      - name: Set up Node.js for the embedded Explorer
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: packages/thelake-explorer/package-lock.json
+
+      - name: Set up Go for thelake-collector
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+          cache-dependency-path: collector/go.sum
+
+      - name: Restore build cache
+        uses: ./.github/actions/thelake-cache
+
+      - name: Bootstrap ubuntu runner
+        uses: ./.github/actions/ubuntu-runner
+
+      - name: Doctor
+        run: make doctor
+
+      - name: Build TheLake release artifacts
+        run: make build-release
+
+      - name: Compute target SHA
+        id: vars
+        run: |
+          full_sha="$(git rev-parse HEAD)"
+          short_sha="$(git rev-parse --short=7 HEAD)"
+          {
+            echo "target_sha=${full_sha}"
+            echo "short_sha=${short_sha}"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract TheLake metadata
+        id: meta_thelake
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          flavor: |
+            latest=false
+          tags: |
+            type=raw,value=sha-${{ steps.vars.outputs.target_sha }}
+            type=raw,value=sha-${{ steps.vars.outputs.short_sha }}
+            type=ref,event=branch
+            type=ref,event=pr
+
+      - name: Extract collector metadata
+        id: meta_collector
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}-collector
+          flavor: |
+            latest=false
+          tags: |
+            type=raw,value=sha-${{ steps.vars.outputs.target_sha }}
+            type=raw,value=sha-${{ steps.vars.outputs.short_sha }}
+            type=ref,event=branch
+            type=ref,event=pr
+
+      - name: Build and push TheLake CI image to GHCR
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta_thelake.outputs.tags }}
+          labels: ${{ steps.meta_thelake.outputs.labels }}
+          cache-from: type=registry,ref=ghcr.io/${{ github.repository }}:buildcache
+          cache-to: type=registry,ref=ghcr.io/${{ github.repository }}:buildcache,mode=max
+
+      - name: Build and push collector CI image to GHCR
+        uses: docker/build-push-action@v6
+        with:
+          context: ./collector
+          file: ./collector/Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta_collector.outputs.tags }}
+          labels: ${{ steps.meta_collector.outputs.labels }}
+          cache-from: type=registry,ref=ghcr.io/${{ github.repository }}-collector:buildcache
+          cache-to: type=registry,ref=ghcr.io/${{ github.repository }}-collector:buildcache,mode=max
+
+      - name: Verify public unauthenticated GHCR pull
+        env:
+          THELAKE_REF: ghcr.io/${{ github.repository }}:sha-${{ steps.vars.outputs.target_sha }}
+          COLLECTOR_REF: ghcr.io/${{ github.repository }}-collector:sha-${{ steps.vars.outputs.target_sha }}
+        run: |
+          tmp_docker_config="$(mktemp -d)"
+          trap 'rm -rf "${tmp_docker_config}"' EXIT
+          DOCKER_CONFIG="${tmp_docker_config}" docker manifest inspect "${THELAKE_REF}" >/dev/null
+          DOCKER_CONFIG="${tmp_docker_config}" docker manifest inspect "${COLLECTOR_REF}" >/dev/null
+
+  dispatch-system-e2e:
+    name: Trigger Softprobe System E2E
+    needs: publish-ci-image
+    if: github.repository == 'softprobe/thelake'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Dispatch system-e2e workflow when org token is configured
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+          TARGET_SHA: ${{ needs.publish-ci-image.outputs.target_sha }}
+        run: |
+          if [ -z "${GH_TOKEN}" ]; then
+            echo "GH_PAT secret is not configured; skipping cross-repo dispatch to private softprobe/dev."
+            exit 0
+          fi
+          dispatch_ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          gh workflow run system-e2e.yml \
+            --repo softprobe/dev \
+            -f override_repo=thelake \
+            -f override_ref="sha-${TARGET_SHA}"
+          run_id=""
+          for _ in $(seq 1 24); do
+            sleep 5
+            run_id="$(gh run list \
+              --repo softprobe/dev \
+              --workflow system-e2e.yml \
+              --event workflow_dispatch \
+              --limit 10 \
+              --json databaseId,createdAt,displayTitle \
+              --jq "[.[] | select(.createdAt >= \"${dispatch_ts}\")][0].databaseId // empty")"
+            if [ -n "${run_id}" ]; then
+              break
+            fi
+          done
+          if [ -z "${run_id}" ]; then
+            echo "Failed to locate dispatched system-e2e run on softprobe/dev." >&2
+            exit 1
+          fi
+          gh run watch "${run_id}" --repo softprobe/dev --exit-status
