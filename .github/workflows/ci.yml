@@ -375,10 +375,21 @@ jobs:
             exit 0
           fi
           dispatch_ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          gh workflow run system-e2e.yml \
+          set +e
+          dispatch_err="$(gh workflow run system-e2e.yml \
             --repo softprobe/dev \
             -f override_repo=thelake \
-            -f override_ref="sha-${TARGET_SHA}"
+            -f override_ref="sha-${TARGET_SHA}" 2>&1)"
+          rc=$?
+          set -e
+          if [ "${rc}" -ne 0 ]; then
+            if echo "${dispatch_err}" | grep -q "not in the list of allowed values"; then
+              echo "softprobe/dev system-e2e.yml does not accept override_repo=thelake yet (tracked in softprobe/dev#258); skipping."
+              exit 0
+            fi
+            echo "${dispatch_err}" >&2
+            exit "${rc}"
+          fi
           run_id=""
           for _ in $(seq 1 24); do
             sleep 5
