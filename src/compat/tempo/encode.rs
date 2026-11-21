@@ -330,6 +330,72 @@ mod tests {
     use http_body_util::BodyExt;
 
     #[tokio::test]
+    async fn v2_trace_emits_scope_attributes_as_arrays_and_keeps_all_spans() {
+        let span = |span_id: &str, instrumentation_scope: Value| TraceSpan {
+            trace_id: "000102030405060708090a0b0c0d0e0f".into(),
+            span_id: span_id.into(),
+            parent_span_id: None,
+            name: "root".into(),
+            kind: None,
+            start_time_unix_nano: 10,
+            end_time_unix_nano: Some(20),
+            attributes: vec![],
+            status_code: None,
+            status_message: None,
+            events: vec![],
+            service_name: Some("api".into()),
+            resource_attributes: vec![],
+            instrumentation_scope: Some(instrumentation_scope),
+            links: vec![],
+        };
+        let response = trace_v2_response(
+            &TraceData {
+                spans: vec![
+                    span(
+                        "0001020304050607",
+                        json!({"name": "legacy", "attributes": "[]"}),
+                    ),
+                    span(
+                        "1011121314151617",
+                        json!({
+                            "name": "current",
+                            "attributes": [{
+                                "key": "scope.attr",
+                                "value": {"stringValue": "preserved"}
+                            }]
+                        }),
+                    ),
+                ],
+            },
+            100_000,
+        )
+        .expect("response");
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let json: Value = serde_json::from_slice(&body).unwrap();
+        let scopes = json["trace"]["resourceSpans"][0]["scopeSpans"]
+            .as_array()
+            .unwrap();
+
+        assert_eq!(
+            scopes
+                .iter()
+                .map(|scope| scope["spans"].as_array().unwrap().len())
+                .sum::<usize>(),
+            2
+        );
+        let legacy = scopes
+            .iter()
+            .find(|scope| scope["scope"]["name"] == "legacy")
+            .unwrap();
+        assert_eq!(legacy["scope"]["attributes"], json!([]));
+        let current = scopes
+            .iter()
+            .find(|scope| scope["scope"]["name"] == "current")
+            .unwrap();
+        assert_eq!(current["scope"]["attributes"][0]["key"], "scope.attr");
+    }
+
+    #[tokio::test]
     async fn encodes_v2_otlp_shape_with_nanoseconds_events_and_status() {
         let data = TraceData {
             spans: vec![TraceSpan {

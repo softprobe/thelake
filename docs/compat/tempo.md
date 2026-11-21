@@ -31,10 +31,11 @@ Malformed selectors, bounds, durations, and limits use the bad-request contract.
 
 The current projection preserves span identity, parent span IDs, deterministic
 ordering, nanosecond span and event timestamps, string span/resource attributes,
-status, events, links, and instrumentation scope name/version. TraceQL predicates
-over event, link, and arbitrary instrumentation-scope fields remain explicitly
-unsupported; that query-language boundary does not remove supported scope
-name/version fields from trace responses.
+status, events, links, and instrumentation scope name/version. Tempo v2 trace
+responses encode available instrumentation-scope attributes as OTLP key/value
+arrays. TraceQL predicates over event, link, and arbitrary instrumentation-scope
+fields remain explicitly unsupported; that query-language boundary does not
+remove supported scope fields from trace responses.
 
 ## Differential evidence
 
