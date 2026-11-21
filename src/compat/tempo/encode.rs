@@ -150,7 +150,7 @@ fn scope_groups(scopes: &ScopeGroups<'_>) -> Result<Vec<Value>, CompatError> {
         .values()
         .map(|(scope, spans)| {
             Ok(json!({
-                "scope": scope,
+                "scope": wire_instrumentation_scope(scope),
                 "spans": spans
                     .iter()
                     .map(|item| span(item))
@@ -158,6 +158,27 @@ fn scope_groups(scopes: &ScopeGroups<'_>) -> Result<Vec<Value>, CompatError> {
             }))
         })
         .collect()
+}
+
+fn wire_instrumentation_scope(scope: &Value) -> Value {
+    let Some(mut scope) = scope.as_object().cloned() else {
+        return scope.clone();
+    };
+    match scope.get("attributes") {
+        Some(Value::Array(_)) | None => {}
+        Some(Value::String(encoded)) => match serde_json::from_str::<Value>(encoded) {
+            Ok(Value::Array(attributes)) => {
+                scope.insert("attributes".into(), Value::Array(attributes));
+            }
+            _ => {
+                scope.remove("attributes");
+            }
+        },
+        Some(_) => {
+            scope.remove("attributes");
+        }
+    }
+    Value::Object(scope)
 }
 
 type ScopeGroups<'a> = BTreeMap<String, (Value, Vec<&'a TraceSpan>)>;
