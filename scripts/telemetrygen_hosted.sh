@@ -5,14 +5,14 @@
 # Requires: telemetrygen on PATH, e.g.
 #   go install github.com/open-telemetry/opentelemetry-collector-contrib/cmd/telemetrygen@latest
 # Or run the same image interactively and invoke telemetrygen inside:
-#   docker run --rm -e SOFTPROBE_TOKEN -e OTLP_ENDPOINT ghcr.io/open-telemetry/opentelemetry-collector-contrib/telemetrygen:latest traces --help
+#   docker run --rm -e INGESTION_KEY -e OTLP_ENDPOINT ghcr.io/open-telemetry/opentelemetry-collector-contrib/telemetrygen:latest traces --help
 #
-# Authentication: hosted runtimes expect Authorization: Bearer <api key>.
-#   export SOFTPROBE_TOKEN="your-api-key"
+# Authentication: hosted runtimes expect Authorization: Bearer <Agent Ingestion Key>.
+#   export INGESTION_KEY="spk_..."
 #   Optional: source repo-root .env (this script loads ../../.env if present).
 #
 # Environment:
-#   SOFTPROBE_TOKEN or SOFTPROBE_API_KEY   API key for Bearer auth (required)
+#   INGESTION_KEY     Agent Ingestion Key for OTLP writes (required)
 #   OTLP_ENDPOINT     host:port for OTLP HTTP/TLS (default: runtime.softprobe.dev:443)
 #   TELEMETRYGEN_CMD  override binary (default: telemetrygen)
 
@@ -28,9 +28,6 @@ if [[ -f "${REPO_ROOT}/.env" ]]; then
   set +a
 fi
 
-# Accept either name (repo .env often uses SOFTPROBE_API_KEY).
-SOFTPROBE_TOKEN="${SOFTPROBE_TOKEN:-${SOFTPROBE_API_KEY:-}}"
-
 OTLP_ENDPOINT="${OTLP_ENDPOINT:-runtime.softprobe.dev:443}"
 TELEMETRYGEN_CMD="${TELEMETRYGEN_CMD:-telemetrygen}"
 
@@ -39,10 +36,10 @@ usage() {
 Usage: telemetrygen_hosted.sh <traces|logs|all> [extra telemetrygen args...]
 
 Examples:
-  SOFTPROBE_TOKEN="$KEY" ./telemetrygen_hosted.sh traces --traces 5
-  # Or rely on SOFTPROBE_API_KEY from repo-root .env after sourcing:
+  INGESTION_KEY="$KEY" ./telemetrygen_hosted.sh traces --traces 5
+  # Or rely on INGESTION_KEY from repo-root .env after sourcing:
   ./telemetrygen_hosted.sh all
-  OTLP_ENDPOINT=localhost:8090 SOFTPROBE_TOKEN="$KEY" ./telemetrygen_hosted.sh all
+  OTLP_ENDPOINT=localhost:8090 INGESTION_KEY="$KEY" ./telemetrygen_hosted.sh all
 
 Subcommands:
   traces   OTLP HTTP traces -> /v1/traces
@@ -64,13 +61,13 @@ if [[ -z "${SUB}" ]]; then
   exit 1
 fi
 
-if [[ -z "${SOFTPROBE_TOKEN:-}" ]]; then
-  echo "error: set SOFTPROBE_TOKEN (API key for Bearer auth)" >&2
+if [[ -z "${INGESTION_KEY:-}" ]]; then
+  echo "error: set INGESTION_KEY (Agent Ingestion Key for OTLP writes)" >&2
   exit 1
 fi
 
 # telemetrygen expects --otlp-header in the form key="value" (see telemetrygen traces --help).
-AUTH_HEADER="Authorization=\"Bearer ${SOFTPROBE_TOKEN}\""
+AUTH_HEADER="Authorization=\"Bearer ${INGESTION_KEY}\""
 
 # Subcommand (traces|logs) must be the first argument after the binary (cobra).
 otlp_flags=(

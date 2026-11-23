@@ -12,13 +12,14 @@ pip install 'softprobe[langchain]'
 ```
 
 ```python
+import os
+
 from softprobe import SoftprobeClient
 from softprobe.langchain import CallbackHandler
 
 sp = SoftprobeClient(
-    public_key="e2e-token",
-    base_url="http://127.0.0.1:8091",
-    otlp_endpoint="http://127.0.0.1:8091/v1/traces",
+    ingestion_key=os.environ["INGESTION_KEY"],
+    otlp={"traces_endpoint": "http://127.0.0.1:8091/v1/traces"},
 )
 handler = CallbackHandler(
     softprobe_client=sp,
