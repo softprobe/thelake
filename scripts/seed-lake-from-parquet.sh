@@ -77,16 +77,18 @@ MP_ESC="$(sql_escape "${metadata_path}")"
 DP_ESC="$(sql_escape "${data_path}")"
 SCHEMA_ESC="$(sql_escape "${metadata_schema}")"
 
-ATTACH_SQL="
-INSTALL ducklake; LOAD ducklake;
-INSTALL postgres; LOAD postgres;
-SET unsafe_enable_version_guessing = true;
-ATTACH 'ducklake:postgres:${MP_ESC}' AS ${ALIAS} (
-  DATA_PATH '${DP_ESC}',
-  METADATA_SCHEMA '${SCHEMA_ESC}',
-  META_SCHEMA '${SCHEMA_ESC}'
-);
-"
+ATTACH_SQL="$(python3 -c '
+from pathlib import Path
+import sys
+
+template = Path(sys.argv[1]).read_text(encoding="utf-8")
+values = dict(argument.split("=", 1) for argument in sys.argv[2:])
+for key, value in values.items():
+    template = template.replace("{{" + key + "}}", value)
+print(template)
+' "${ROOT}/scripts/seed_lake_sql/attach_ducklake.sql" \
+  "metadata_path=${MP_ESC}" "data_path=${DP_ESC}" \
+  "schema=${SCHEMA_ESC}" "alias=${ALIAS}")"
 
 load_table() {
   local table="$1"
@@ -147,47 +149,9 @@ schema = """${metadata_schema}"""
 csv_path = Path("""${SUMMARY_CSV}""")
 cols = next(csv.reader(csv_path.open()))
 has_tenant = "tenant_id" in cols
-if has_tenant:
-    ddl = f'''
-CREATE SCHEMA IF NOT EXISTS {schema};
-CREATE TABLE IF NOT EXISTS {schema}.session_summary (
-  tenant_id TEXT NOT NULL,
-  session_id TEXT NOT NULL,
-  start_time TIMESTAMPTZ NOT NULL,
-  end_time TIMESTAMPTZ,
-  observation_count BIGINT NOT NULL DEFAULT 0,
-  error_count BIGINT NOT NULL DEFAULT 0,
-  input_tokens BIGINT,
-  output_tokens BIGINT,
-  total_tokens BIGINT,
-  total_cost DOUBLE PRECISION,
-  agent_name TEXT,
-  user_id TEXT,
-  model_name TEXT,
-  updated_at TIMESTAMPTZ NOT NULL,
-  PRIMARY KEY (tenant_id, session_id)
-);
-'''
-else:
-    ddl = f'''
-CREATE SCHEMA IF NOT EXISTS {schema};
-CREATE TABLE IF NOT EXISTS {schema}.session_summary (
-  session_id TEXT NOT NULL,
-  start_time TIMESTAMPTZ NOT NULL,
-  end_time TIMESTAMPTZ,
-  observation_count BIGINT NOT NULL DEFAULT 0,
-  error_count BIGINT NOT NULL DEFAULT 0,
-  input_tokens BIGINT,
-  output_tokens BIGINT,
-  total_tokens BIGINT,
-  total_cost DOUBLE PRECISION,
-  agent_name TEXT,
-  user_id TEXT,
-  model_name TEXT,
-  updated_at TIMESTAMPTZ NOT NULL,
-  PRIMARY KEY (session_id)
-);
-'''
+template_name = "session_summary_with_tenant.sql" if has_tenant else "session_summary.sql"
+template_path = Path("${ROOT}/scripts/seed_lake_sql") / template_name
+ddl = template_path.read_text(encoding="utf-8").replace("{{schema}}", schema)
 
 def run_psql(sql: str) -> None:
     if shutil.which("psql"):
