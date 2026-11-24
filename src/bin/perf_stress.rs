@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use chrono::Utc;
 use clap::Parser;
 use opentelemetry_proto::tonic::collector::{
@@ -71,10 +71,9 @@ struct Args {
     #[arg(long)]
     service_url: String,
 
-    /// Bearer token for `/v1/*` auth (control-plane). Defaults to `test-token`
-    /// for local auth mocks; override with `--api-token` or `SOFTPROBE_API_TOKEN`.
-    #[arg(long, default_value = "test-token")]
-    api_token: String,
+    /// Softprobe API Key for workspace read APIs.
+    #[arg(long)]
+    softprobe_api_key: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -306,18 +305,19 @@ async fn main() -> Result<()> {
     let base_url = args.service_url.trim_end_matches('/').to_string();
     println!("Using service API at: {}", base_url);
 
-    let api_token = std::env::var("SOFTPROBE_API_TOKEN")
+    let softprobe_api_key = std::env::var("SOFTPROBE_API_KEY")
         .ok()
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| args.api_token.clone());
+        .or_else(|| args.softprobe_api_key.clone())
+        .ok_or_else(|| anyhow!("SOFTPROBE_API_KEY or --softprobe-api-key is required"))?;
     let mut headers = reqwest::header::HeaderMap::new();
-    let auth_value = format!("Bearer {}", api_token.trim());
+    let auth_value = format!("Bearer {}", softprobe_api_key.trim());
     headers.insert(
         reqwest::header::AUTHORIZATION,
         auth_value
             .parse()
-            .expect("api_token must form a valid Authorization header value"),
+            .expect("softprobe_api_key must form a valid Authorization header value"),
     );
     let http_client = reqwest::Client::builder()
         .default_headers(headers)

@@ -69,8 +69,8 @@ pub fn assertion_hmac_secret() -> Option<String> {
     None
 }
 
-pub fn ingest_key_resolve_url() -> Option<String> {
-    if let Ok(raw) = std::env::var("SOFTPROBE_INGEST_KEY_RESOLVE_URL") {
+pub fn ingestion_key_resolve_url() -> Option<String> {
+    if let Ok(raw) = std::env::var("INGESTION_KEY_RESOLVE_URL") {
         let trimmed = raw.trim();
         if !trimmed.is_empty() {
             return Some(trimmed.to_string());
@@ -79,24 +79,24 @@ pub fn ingest_key_resolve_url() -> Option<String> {
     if let Ok(base) = std::env::var("SOFTPROBE_EXPLORER_URL") {
         let trimmed = base.trim().trim_end_matches('/');
         if !trimmed.is_empty() {
-            return Some(format!("{trimmed}/api/internal/ingest-key/resolve"));
+            return Some(format!("{trimmed}/api/internal/ingestion-key/resolve"));
         }
     }
     None
 }
 
-pub fn is_ingest_key_resolve_configured() -> bool {
-    ingest_key_resolve_url().is_some() && assertion_hmac_secret().is_some()
+pub fn is_ingestion_key_resolve_configured() -> bool {
+    ingestion_key_resolve_url().is_some() && assertion_hmac_secret().is_some()
 }
 
-pub fn mint_resolve_ingest_key_assertion(secret: &str, now_sec: i64) -> Result<String> {
+pub fn mint_resolve_ingestion_key_assertion(secret: &str, now_sec: i64) -> Result<String> {
     let header = URL_SAFE_NO_PAD.encode(br#"{"alg":"HS256","typ":"JWT"}"#);
     let payload = serde_json::json!({
         "iss": "softprobe-thelake",
         "aud": "sp-explorer",
         "sub": "thelake-server",
         "workspace_id": "00000000-0000-0000-0000-000000000000",
-        "capabilities": ["resolve_ingest_key"],
+        "capabilities": ["resolve_ingestion_key"],
         "exp": now_sec + 60,
     });
     let payload_b64 = URL_SAFE_NO_PAD.encode(payload.to_string().as_bytes());
@@ -109,24 +109,24 @@ pub fn mint_resolve_ingest_key_assertion(secret: &str, now_sec: i64) -> Result<S
 }
 
 #[derive(Debug, Clone)]
-pub enum IngestKeyResolveError {
+pub enum IngestionKeyResolveError {
     Unconfigured,
     Unauthorized,
     Upstream(String),
 }
 
-static INGEST_KEY_CACHE: std::sync::OnceLock<
+static INGESTION_KEY_CACHE: std::sync::OnceLock<
     dashmap::DashMap<[u8; 32], (SoftprobeAssertionClaims, std::time::Instant)>,
 > = std::sync::OnceLock::new();
-static INGEST_KEY_HTTP_CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+static INGESTION_KEY_HTTP_CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
 
-fn ingest_key_cache(
+fn ingestion_key_cache(
 ) -> &'static dashmap::DashMap<[u8; 32], (SoftprobeAssertionClaims, std::time::Instant)> {
-    INGEST_KEY_CACHE.get_or_init(dashmap::DashMap::new)
+    INGESTION_KEY_CACHE.get_or_init(dashmap::DashMap::new)
 }
 
-fn ingest_key_http_client() -> &'static reqwest::Client {
-    INGEST_KEY_HTTP_CLIENT.get_or_init(|| {
+fn ingestion_key_http_client() -> &'static reqwest::Client {
+    INGESTION_KEY_HTTP_CLIENT.get_or_init(|| {
         reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(5))
             .build()
@@ -135,56 +135,58 @@ fn ingest_key_http_client() -> &'static reqwest::Client {
 }
 
 #[derive(Deserialize)]
-struct IngestKeyResolveResponse {
+struct IngestionKeyResolveResponse {
     assertion: String,
 }
 
-pub async fn resolve_ingest_key(
+pub async fn resolve_ingestion_key(
     token: &str,
-) -> std::result::Result<SoftprobeAssertionClaims, IngestKeyResolveError> {
-    let resolve_url = ingest_key_resolve_url().ok_or(IngestKeyResolveError::Unconfigured)?;
-    let secret = assertion_hmac_secret().ok_or(IngestKeyResolveError::Unconfigured)?;
+) -> std::result::Result<SoftprobeAssertionClaims, IngestionKeyResolveError> {
+    let resolve_url = ingestion_key_resolve_url().ok_or(IngestionKeyResolveError::Unconfigured)?;
+    let secret = assertion_hmac_secret().ok_or(IngestionKeyResolveError::Unconfigured)?;
 
     let cache_key: [u8; 32] = Sha256::digest(token.as_bytes()).into();
     let now_instant = std::time::Instant::now();
     let now_sec = chrono::Utc::now().timestamp();
-    if let Some(entry) = ingest_key_cache().get(&cache_key) {
+    if let Some(entry) = ingestion_key_cache().get(&cache_key) {
         if now_instant < entry.1 && entry.0.exp.is_none_or(|exp| exp >= now_sec) {
             return Ok(entry.0.clone());
         }
     }
 
-    let service_jwt = mint_resolve_ingest_key_assertion(&secret, now_sec)
-        .map_err(|e| IngestKeyResolveError::Upstream(e.to_string()))?;
+    let service_jwt = mint_resolve_ingestion_key_assertion(&secret, now_sec)
+        .map_err(|e| IngestionKeyResolveError::Upstream(e.to_string()))?;
 
-    let resp = ingest_key_http_client()
+    let resp = ingestion_key_http_client()
         .post(&resolve_url)
         .header(ASSERTION_HEADER, service_jwt)
-        .json(&serde_json::json!({ "apiKey": token }))
+        .json(&serde_json::json!({ "ingestionKey": token }))
         .send()
         .await
-        .map_err(|e| IngestKeyResolveError::Upstream(format!("ingest key resolve failed: {e}")))?;
+        .map_err(|e| {
+            IngestionKeyResolveError::Upstream(format!("ingestion key resolution failed: {e}"))
+        })?;
 
     let status = resp.status();
     if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
-        return Err(IngestKeyResolveError::Unauthorized);
+        return Err(IngestionKeyResolveError::Unauthorized);
     }
     if !status.is_success() {
-        return Err(IngestKeyResolveError::Upstream(format!(
-            "ingest key resolution returned status {status}"
+        return Err(IngestionKeyResolveError::Upstream(format!(
+            "ingestion key resolution returned status {status}"
         )));
     }
 
-    let payload: IngestKeyResolveResponse = resp
+    let payload: IngestionKeyResolveResponse = resp
         .json()
         .await
-        .map_err(|_| IngestKeyResolveError::Unauthorized)?;
+        .map_err(|_| IngestionKeyResolveError::Unauthorized)?;
     if payload.assertion.trim().is_empty() {
-        return Err(IngestKeyResolveError::Unauthorized);
+        return Err(IngestionKeyResolveError::Unauthorized);
     }
 
     let claims = verify_softprobe_assertion(&payload.assertion, &secret, now_sec)
-        .map_err(|_| IngestKeyResolveError::Unauthorized)?;
+        .map_err(|_| IngestionKeyResolveError::Unauthorized)?;
 
     let mut ttl = std::time::Duration::from_secs(60);
     if let Some(exp) = claims.exp {
@@ -195,7 +197,7 @@ pub async fn resolve_ingest_key(
         ttl = ttl.min(std::time::Duration::from_secs(remaining as u64));
     }
     if !ttl.is_zero() {
-        ingest_key_cache().insert(cache_key, (claims.clone(), std::time::Instant::now() + ttl));
+        ingestion_key_cache().insert(cache_key, (claims.clone(), std::time::Instant::now() + ttl));
     }
 
     Ok(claims)
@@ -295,53 +297,6 @@ pub fn workspace_auth_from_assertion(claims: &SoftprobeAssertionClaims) -> Resul
         dataset_id: String::new(),
         agent_id,
         agent_name,
-    })
-}
-
-/// Optional DuckLake workspace id for clients that send Bearer auth but no
-/// `X-Softprobe-Assertion` (see docs/compat/auth.md).
-///
-/// Env: `SOFTPROBE_DEFAULT_WORKSPACE_ID` or alias `THELAKE_DEFAULT_WORKSPACE_ID`.
-/// Reserved ops id `thelake-ops` is rejected.
-pub fn default_workspace_id_from_env() -> Option<String> {
-    for key in [
-        "SOFTPROBE_DEFAULT_WORKSPACE_ID",
-        "THELAKE_DEFAULT_WORKSPACE_ID",
-    ] {
-        if let Ok(v) = std::env::var(key) {
-            let t = v.trim();
-            if t.is_empty() {
-                continue;
-            }
-            if crate::self_monitoring::is_reserved_workspace_id(t) {
-                tracing::warn!("{key}={t} is reserved; ignoring default-workspace fallback");
-                return None;
-            }
-            match parse_workspace_id(t) {
-                Ok(id) => return Some(id),
-                Err(_) => {
-                    tracing::warn!("{key}={t} is not a UUID; ignoring default-workspace fallback");
-                    return None;
-                }
-            }
-        }
-    }
-    None
-}
-
-/// Bind Bearer-only traffic to a configured default workspace.
-pub fn workspace_auth_for_default_lake(workspace_id: &str) -> Result<WorkspaceAuth> {
-    let workspace_id =
-        parse_workspace_id(workspace_id).map_err(|err| anyhow!("default workspace_id: {err}"))?;
-    if crate::self_monitoring::is_reserved_workspace_id(&workspace_id) {
-        bail!("default workspace_id must not be reserved ops scope");
-    }
-    Ok(WorkspaceAuth {
-        workspace_id,
-        bucket_name: std::env::var("DATALAKE_BUCKET").unwrap_or_default(),
-        dataset_id: String::new(),
-        agent_id: None,
-        agent_name: None,
     })
 }
 
@@ -463,47 +418,5 @@ mod tests {
             "test-secret",
         );
         assert!(verify_softprobe_assertion(&token, "other-secret", now).is_err());
-    }
-
-    #[test]
-    fn default_workspace_id_from_env_reads_primary_and_alias() {
-        let _env_lock = AUTH_ENV_TEST_LOCK.blocking_lock();
-        let prev_primary = std::env::var("SOFTPROBE_DEFAULT_WORKSPACE_ID").ok();
-        let prev_alias = std::env::var("THELAKE_DEFAULT_WORKSPACE_ID").ok();
-        std::env::remove_var("SOFTPROBE_DEFAULT_WORKSPACE_ID");
-        std::env::remove_var("THELAKE_DEFAULT_WORKSPACE_ID");
-        assert_eq!(default_workspace_id_from_env(), None);
-
-        std::env::set_var("THELAKE_DEFAULT_WORKSPACE_ID", WS);
-        assert_eq!(default_workspace_id_from_env().as_deref(), Some(WS));
-
-        let primary = "11111111-1111-1111-1111-111111111111";
-        std::env::set_var("SOFTPROBE_DEFAULT_WORKSPACE_ID", primary);
-        assert_eq!(default_workspace_id_from_env().as_deref(), Some(primary));
-
-        std::env::set_var("SOFTPROBE_DEFAULT_WORKSPACE_ID", "thelake-ops");
-        assert_eq!(default_workspace_id_from_env(), None);
-
-        std::env::set_var("SOFTPROBE_DEFAULT_WORKSPACE_ID", "not-a-uuid");
-        assert_eq!(default_workspace_id_from_env(), None);
-
-        match prev_primary {
-            Some(v) => std::env::set_var("SOFTPROBE_DEFAULT_WORKSPACE_ID", v),
-            None => std::env::remove_var("SOFTPROBE_DEFAULT_WORKSPACE_ID"),
-        }
-        match prev_alias {
-            Some(v) => std::env::set_var("THELAKE_DEFAULT_WORKSPACE_ID", v),
-            None => std::env::remove_var("THELAKE_DEFAULT_WORKSPACE_ID"),
-        }
-    }
-
-    #[test]
-    fn workspace_auth_for_default_lake_binds_scope() {
-        let info = workspace_auth_for_default_lake(WS).unwrap();
-        assert_eq!(info.workspace_id, WS);
-        assert!(info.agent_id.is_none());
-        assert!(workspace_auth_for_default_lake("thelake-ops").is_err());
-        assert!(workspace_auth_for_default_lake("  ").is_err());
-        assert!(workspace_auth_for_default_lake("ws-slug").is_err());
     }
 }

@@ -1,144 +1,69 @@
-# Compatibility authentication and workspace isolation
+# Authentication and workspace isolation
 
-**Status:** Current contract
+TheLake accepts three authenticated request forms. Each request is assigned a
+workspace by its credential; clients cannot select a workspace through a query
+parameter or request body.
 
-## Canonical identity
+## User API access
 
-Preferred Softprobe identity for Explorer and edge-proxied traffic is the
-dedicated assertion header:
+Use the workspace's **Softprobe API Key** for read and general API access:
+
+```http
+Authorization: Bearer <SOFTPROBE_API_KEY>
+```
+
+TheLake resolves the key through the configured Softprobe auth service. The
+resolved workspace ID must be a UUID. Query, session detail, score configuration,
+administrative, Loki, and Tempo access follow the API key's assigned permissions.
+
+## Agent data ingestion
+
+Use an Agent-bound **Ingestion Key** only for data submission:
+
+```http
+Authorization: Bearer <INGESTION_KEY>
+```
+
+Explorer resolves the key to its Agent and issues a short-lived assertion scoped
+to that Agent and workspace. Ingestion keys can submit traces, logs, and scores;
+they cannot read sessions or invoke control, administrative, Loki, or Tempo APIs.
+The Agent identity is stamped onto persisted telemetry.
+
+When traffic passes through Explorer, the Worker may send the signed assertion
+in this header instead:
 
 ```http
 X-Softprobe-Assertion: <jwt>
 ```
 
-thelake verifies HS256 (`SOFTPROBE_ASSERTION_HMAC_SECRET` /
-`ASSERTION_HMAC_SECRET`), then binds DuckLake scope from claim **`workspace_id`**
-(Softprobe `workspaces.id` UUID). Assertion traffic does **not** call the
-Softprobe auth API-key validate service.
+TheLake verifies the assertion and uses its `workspace_id`, `agent_id`, and
+`capabilities` claims. A workspace assertion has workspace access; an Agent
+assertion is limited to the ingest routes.
 
-`workspace_id` must be a UUID on every identity path (assertion claims, Bearer
-auth-service responses, and default-workspace env). Non-UUID strings are
-rejected.
+## Workspace provisioning
 
-Optional assertion claims **`agent_id`** / **`agent_name`** (minted for agent API
-keys) are stamped onto every ingested trace and log row. Browser/session JWTs
-without those claims leave the columns NULL. `POST /v1/sessions/search`
-can filter by `agent_name`, derived as persisted column, then `sp.agent.name`,
-then the agent span name.
+`POST /v1/workspaces` uses the service-only `SOFTPROBE_ADMIN_API_KEY`. That key
+is for workspace provisioning and is not a user or Agent credential.
 
-## Agent ingest capability
-
-Explorer resolves each opaque `spk_…` key to its registered Agent and mints a
-short-lived assertion with `agent_id`, `agent_name`, and
-`capabilities: ["ingest"]`. Agent is the identity for an agentic app in this
-scope; there is no separate App registry. TheLake enforces the capability
-before dispatching to authenticated data, control, and compatibility routes.
-
-The allowed Agent assertion routes are exactly `POST /v1/traces`,
-`POST /v1/logs`, and `POST /v1/scores`. Queries, score configuration, control,
-administrative, Loki, and Tempo routes are denied. Ordinary workspace-user
-assertions without Agent/capability claims retain their existing route access.
-Admin provisioning remains separately guarded by `SOFTPROBE_ADMIN_API_KEY`.
-OTLP `app_id` is caller-supplied metadata, not the authorization owner. See
-the [cross-repo design and verification map](../../../sp-llm/docs/specs/agent-api-key-authorization.md).
-
-Opaque Agent `spk_…` keys are resolved by Explorer's HTTP gateway. Direct
-TheLake OTLP/gRPC does not accept that key or carry its Agent capability
-assertion; Agent capture exporters must use the Explorer HTTP ingest path until
-equivalent gRPC enforcement is implemented. TheLake persists each batch
-statelessly without cross-span session correlation; out-of-order browser and OBI
-spans are correlated externally in `thelake-collector` within the verified
-`(workspace_id, agent_id)` assertion scope before reaching TheLake. No capture
-ID is needed or accepted as an authorization claim.
-
-### Bearer API key
-
-Machine clients (Grafana datasources, some OTLP ingest paths) may send:
-
-```http
-Authorization: Bearer <softprobe-api-key-or-assertion-jwt>
-```
-
-Resolution order when `X-Softprobe-Assertion` is absent:
-
-1. If the Bearer token is a Softprobe assertion JWT (HS256), verify it and bind
-   DuckLake scope from `workspace_id` (Explorer workspace ingest keys use this).
-2. Else if **`SOFTPROBE_DEFAULT_WORKSPACE_ID`** (alias
-   `THELAKE_DEFAULT_WORKSPACE_ID`) is set to a non-empty workspace UUID (must not
-   be reserved `thelake-ops`): reject opaque Explorer `spk_…` keys; otherwise
-   require a non-empty Bearer, then bind that default lake **without** calling
-   the Softprobe auth service.
-3. Otherwise resolve through `SOFTPROBE_AUTH_URL`. The auth response
-   `workspaceId` must be a UUID; non-UUID values are rejected.
-
-When both the assertion header and Authorization are present, **assertion wins**.
-
-Default-lake fallback still requires `Authorization: Bearer …` (any non-empty
-token except an opaque Explorer `spk_…` key). It does **not** open anonymous
-ingest. Prefer assertion or Explorer gateway (`/api/thelake`) for new clients;
-keep the default workspace id temporary and workspace-specific. A direct
-`spk_…` request is rejected with `401` because only Explorer resolves that key.
-
-Admin provisioning stays admin-key only: `POST /v1/workspaces` with
-`SOFTPROBE_ADMIN_API_KEY`.
-
-## Workspace constitution
-
-Operational and compatibility handlers **must not** accept `workspace_id` (or
-equivalent) from query parameters or request bodies. Workspace scope comes only
-from the authenticated context established by middleware (`workspace_id` from
-assertion, default-workspace env, or auth-service `workspaceId` from Bearer).
+Workspace IDs must be UUIDs on every authenticated path. The internal storage
+scope `_default` is not an authentication identity. Reserved workspace ID
+`thelake-ops` is rejected by provisioning.
 
 ## Protocol scope headers
 
-Some Grafana/Loki/Tempo clients also send tenant scope headers. Softprobe treats
-them as **informational consistency checks**, never as the source of truth.
+Some Grafana, Loki, and Tempo clients also send tenant scope headers. These are
+consistency checks only, never the source of authentication or workspace
+selection.
 
 | Protocol | Header | Behavior |
 |----------|--------|----------|
-| Loki | `X-Scope-OrgID` | If present and non-empty, **must equal** authenticated `workspace_id`; otherwise `403` |
-| Tempo | `X-Scope-OrgID` (same convention) | If present and non-empty, **must equal** authenticated `workspace_id`; otherwise `403` |
+| Loki | `X-Scope-OrgID` | If present, it must equal the authenticated workspace ID; otherwise `403`. |
+| Tempo | `X-Scope-OrgID` | If present, it must equal the authenticated workspace ID; otherwise `403`. |
 
-Missing scope headers are allowed when auth succeeded: the authenticated
-workspace is used.
+Missing scope headers are allowed after authentication succeeds.
 
-## Self-monitoring and reserved workspace id
+## Self-monitoring
 
-When `self_monitoring.enabled` is true, thelake exports process Meter
-instruments via the standard OTLP metrics exporter (`OTEL_EXPORTER_OTLP_*`).
-Those process metrics are **not** stored in DuckLake and are not served by a
-product Prometheus API.
-
-Reserved workspace id `thelake-ops` is rejected by `POST /v1/workspaces` and by
-default-lake binding so it cannot collide with customer scopes. Customer API
-keys must not resolve to `thelake-ops`.
-
-An unauthorized caller cannot select another workspace by forging `X-Scope-OrgID`
-alone — middleware still requires a valid assertion or Bearer, and a mismatched
-header is denied.
-
-## Auth outcomes
-
-| Condition | HTTP status |
-|-----------|-------------|
-| Missing assertion and Authorization | `401` |
-| Invalid / expired assertion | `401` |
-| Verified assertion without valid UUID `workspace_id` | `403`; do not fall through to default workspace |
-| Agent assertion without owner/capability or used outside the exact ingest routes | `403` |
-| Opaque Explorer `spk_…` Bearer sent directly to TheLake | `401` |
-| Malformed Bearer | `401` |
-| Unknown / rejected API key | `403` |
-| Auth response `workspaceId` not a UUID | `403` |
-| Scope header mismatches authenticated workspace | `403` |
-| Authenticated, feature not implemented | `501` + `unsupported_feature` |
-
-## Compatibility route prefixes
-
-The following path prefixes require the same runtime auth middleware as
-`/v1/*` (CORS `OPTIONS` preflight exempt where applicable):
-
-- `/loki/api/v1/` — Loki-compatible
-- `/api/traces`, `/api/v2/traces`, `/api/search` — Tempo-compatible
-
-Admin provisioning (`POST /v1/workspaces`) remains admin-key only and is unrelated
-to compatibility query routes.
+When `self_monitoring.enabled` is true, TheLake exports process meter
+instruments through the standard OTLP metrics exporter (`OTEL_EXPORTER_OTLP_*`).
+These metrics are not stored in DuckLake or served by a product Prometheus API.

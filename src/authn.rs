@@ -1,4 +1,4 @@
-//! Resolve API keys to workspace identity via the configured auth HTTP service.
+//! Resolve Softprobe API Keys to workspace identity via the configured auth HTTP service.
 
 use anyhow::{anyhow, Result};
 use dashmap::DashMap;
@@ -38,21 +38,23 @@ impl Resolver {
         }
     }
 
-    pub async fn resolve(&self, api_key: &str) -> Result<WorkspaceAuth> {
-        if api_key.is_empty() {
-            return Err(anyhow!("authn: empty API key"));
+    pub async fn resolve(&self, softprobe_api_key: &str) -> Result<WorkspaceAuth> {
+        if softprobe_api_key.is_empty() {
+            return Err(anyhow!("authn: empty Softprobe API Key"));
         }
 
-        if let Some(entry) = self.cache.get(api_key) {
+        if let Some(entry) = self.cache.get(softprobe_api_key) {
             if entry.1.elapsed() < self.ttl {
                 return Ok(entry.0.clone());
             }
         }
 
-        let info = call_auth_service(&self.client, &self.url, api_key).await?;
+        let info = call_auth_service(&self.client, &self.url, softprobe_api_key).await?;
 
-        self.cache
-            .insert(api_key.to_string(), (info.clone(), Instant::now()));
+        self.cache.insert(
+            softprobe_api_key.to_string(),
+            (info.clone(), Instant::now()),
+        );
         Ok(info)
     }
 }
@@ -60,9 +62,9 @@ impl Resolver {
 async fn call_auth_service(
     client: &reqwest::Client,
     url: &str,
-    api_key: &str,
+    softprobe_api_key: &str,
 ) -> Result<WorkspaceAuth> {
-    let body = serde_json::to_string(&serde_json::json!({ "apiKey": api_key }))?;
+    let body = serde_json::to_string(&serde_json::json!({ "softprobeApiKey": softprobe_api_key }))?;
 
     let resp = client
         .post(url)
@@ -104,11 +106,11 @@ async fn call_auth_service(
         .map_err(|e| anyhow!("authn: decode response: {e}"))?;
 
     if !payload.success {
-        return Err(anyhow!("authn: invalid API key"));
+        return Err(anyhow!("authn: invalid Softprobe API Key"));
     }
     let data = payload
         .data
-        .ok_or_else(|| anyhow!("authn: invalid API key"))?;
+        .ok_or_else(|| anyhow!("authn: invalid Softprobe API Key"))?;
 
     let workspace_id = crate::softprobe_assertion::parse_workspace_id(&data.workspace_id)
         .map_err(|err| anyhow!("authn: {err}"))?;
@@ -145,11 +147,11 @@ mod tests {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     #[tokio::test]
-    async fn empty_api_key_errors() {
+    async fn empty_softprobe_api_key_errors() {
         let srv = MockServer::start().await;
         let r = Resolver::new(srv.uri(), Duration::from_secs(60));
         let err = r.resolve("").await.expect_err("empty");
-        assert!(err.to_string().contains("empty API key"));
+        assert!(err.to_string().contains("empty Softprobe API Key"));
     }
 
     #[tokio::test]
@@ -188,7 +190,10 @@ mod tests {
             .await;
         let r = Resolver::new(format!("{}/", srv.uri()), Duration::from_secs(60));
         let err = r.resolve("k").await.expect_err("auth");
-        assert!(err.to_string().contains("invalid API key"), "{err}");
+        assert!(
+            err.to_string().contains("invalid Softprobe API Key"),
+            "{err}"
+        );
     }
 
     #[tokio::test]
