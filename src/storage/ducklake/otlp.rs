@@ -23,10 +23,12 @@ impl DuckLakeWriter {
         manifests: &[TelemetryColumnsManifest],
         table: TelemetryTable,
     ) -> Vec<PromotionColumn> {
+        let mut seen = std::collections::HashSet::new();
         manifests
             .iter()
             .filter(|manifest| manifest.target.tables.contains(&table))
             .flat_map(|manifest| manifest.columns.iter().cloned())
+            .filter(|column| seen.insert(column.name.to_ascii_lowercase()))
             .collect()
     }
 
