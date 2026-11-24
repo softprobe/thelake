@@ -154,7 +154,7 @@ jobs:
           SOURCE_SHA: ${{ steps.release.outputs.source_sha }}
         run: |
           set -euo pipefail
-          manifest="deployment-k8s/gcp/staging/sp-llm/thelake.yaml"
+          manifest="deployment-k8s/gcp/staging/explorer/thelake.yaml"
           app_tag=$(sed -nE 's/^[[:space:]]*image:[[:space:]]*softprobe\/thelake:([^[:space:]#]+).*$/\1/p' "$manifest")
           collector_tag=$(sed -nE 's/^[[:space:]]*image:[[:space:]]*softprobe\/thelake-collector:([^[:space:]#]+).*$/\1/p' "$manifest")
           if [[ -z "${app_tag}" || "${app_tag}" != "${collector_tag}" ]]; then
@@ -197,7 +197,7 @@ jobs:
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add gcp/staging/sp-llm/thelake.yaml
+          git add gcp/staging/explorer/thelake.yaml
           if git diff --cached --quiet; then
             echo "The GitOps manifest already records ${IMAGE_TAG}."
             exit 0
