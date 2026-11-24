@@ -4,7 +4,7 @@
     "urlPath": "/validate",
     "bodyPatterns": [
       {
-        "equalToJson": "{\"apiKey\":\"grafana-test-tenant-a\"}"
+        "equalToJson": "{\"softprobeApiKey\":\"grafana-test-tenant-a\"}"
       }
     ]
   },
