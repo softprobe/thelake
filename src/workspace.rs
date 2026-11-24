@@ -989,16 +989,8 @@ WHERE status = 'active' AND target_kind = 'business_table';"#
     ) -> Result<String> {
         let schema = metadata_schema.replace('"', "\"\"");
         tx.execute(
-            &format!(
-                // Supersede only the same (target_kind, target_tables) pair so distinct
-                // telemetry_columns specs (e.g. traces vs logs) can both stay active.
-                r#"UPDATE "{schema}".promotion_specs
-SET status = 'inactive'
-WHERE status = 'active'
-  AND target_kind = $1
-  AND COALESCE(target_tables, target_table, '') = $2
-  AND spec_id <> $3;"#
-            ),
+            &include_str!("sql/schema/promotion_specs_deactivate.sql")
+                .replace("{{schema}}", &schema),
             &[
                 &activation.target_kind,
                 &activation.target_tables,

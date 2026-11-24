@@ -458,17 +458,16 @@ pub async fn ensure_promotion_metadata_tables(
 
 pub fn promotion_metadata_table_ddls(tenant_schema: &str) -> Vec<String> {
     let schema = quote_sql_ident(tenant_schema);
-    let promotion_specs_ddl = format!(
-        "{}\nCREATE UNIQUE INDEX IF NOT EXISTS promotion_specs_one_active_per_target_idx\n  ON {schema}.promotion_specs (target_kind, COALESCE(target_tables, target_table, ''))\n  WHERE status = 'active';",
-        include_str!("sql/schema/promotion_specs.sql")
-            .replace("{{qualified_table}}", &format!("{schema}.promotion_specs"))
-            .replace("{{spec_id_constraint}}", " PRIMARY KEY")
-    );
     vec![
         format!("CREATE SCHEMA IF NOT EXISTS {schema};"),
-        promotion_specs_ddl,
+        include_str!("sql/schema/promotion_specs.sql")
+            .replace("{{qualified_table}}", &format!("{schema}.promotion_specs"))
+            .replace("{{spec_id_constraint}}", " PRIMARY KEY"),
         include_str!("sql/schema/promotion_errors.sql")
             .replace("{{qualified_table}}", &format!("{schema}.promotion_errors")),
+        format!(
+            "CREATE UNIQUE INDEX IF NOT EXISTS promotion_specs_one_active_per_target_idx\n  ON {schema}.promotion_specs (target_kind, COALESCE(target_tables, target_table, ''))\n  WHERE status = 'active';"
+        ),
     ]
 }
 
@@ -1762,13 +1761,13 @@ columns:
     #[test]
     fn metadata_ddl_creates_specs_and_errors_tables() {
         let ddl = super::promotion_metadata_table_ddls("tenant_alpha");
-        assert_eq!(ddl.len(), 3);
+        assert_eq!(ddl.len(), 4);
         assert!(ddl[0].contains(r#"CREATE SCHEMA IF NOT EXISTS "tenant_alpha""#));
         assert!(ddl[1].contains(r#""tenant_alpha".promotion_specs"#));
         assert!(ddl[1].contains("manifest_hash TEXT NOT NULL"));
-        assert!(ddl[1].contains("promotion_specs_one_active_per_target_idx"));
         assert!(ddl[2].contains(r#""tenant_alpha".promotion_errors"#));
         assert!(ddl[2].contains("raw_value_preview TEXT"));
+        assert!(ddl[3].contains("promotion_specs_one_active_per_target_idx"));
     }
 
     #[test]
