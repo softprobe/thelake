@@ -86,7 +86,7 @@ async fn setup_router(
     mode: WorkspaceScopeMode,
     max_connections: usize,
 ) -> (Router, AppState, TempDir) {
-    std::env::set_var("SOFTPROBE_ASSERTION_HMAC_SECRET", secret);
+    std::env::set_var("ASSERTION_HMAC_SECRET", secret);
     let temp = TempDir::new().expect("tempdir");
     let mut cfg: Config = file_backed_test_config(&temp);
     cfg.ingest.flush_interval_seconds = 3600;

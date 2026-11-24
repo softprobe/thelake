@@ -58,15 +58,10 @@ impl Aud {
 
 /// Shared HMAC secret for assertion verify (Explorer `ASSERTION_HMAC_SECRET`).
 pub fn assertion_hmac_secret() -> Option<String> {
-    for key in ["SOFTPROBE_ASSERTION_HMAC_SECRET", "ASSERTION_HMAC_SECRET"] {
-        if let Ok(v) = std::env::var(key) {
-            let t = v.trim();
-            if !t.is_empty() {
-                return Some(t.to_string());
-            }
-        }
-    }
-    None
+    std::env::var("ASSERTION_HMAC_SECRET")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
 }
 
 pub fn ingestion_key_resolve_url() -> Option<String> {

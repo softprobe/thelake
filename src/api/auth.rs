@@ -319,13 +319,11 @@ mod tests {
 
     fn configure_auth_environment() -> EnvSnapshot {
         let snapshot = EnvSnapshot::capture(&[
-            "SOFTPROBE_ASSERTION_HMAC_SECRET",
             "ASSERTION_HMAC_SECRET",
             "SOFTPROBE_ADMIN_API_KEY",
             "INGESTION_KEY_RESOLVE_URL",
             "SOFTPROBE_EXPLORER_URL",
         ]);
-        std::env::remove_var("SOFTPROBE_ASSERTION_HMAC_SECRET");
         std::env::set_var("ASSERTION_HMAC_SECRET", TEST_SECRET);
         std::env::set_var("SOFTPROBE_ADMIN_API_KEY", "test-admin-key");
         std::env::remove_var("INGESTION_KEY_RESOLVE_URL");
