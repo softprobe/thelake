@@ -30,8 +30,6 @@ export GRAFANA_ADMIN_PASSWORD="grafana-admin-password-123"
 export SOFTPROBE_API_KEY="softprobe-global-api-key-456"
 export SOFTPROBE_TENANT_A_API_KEY="softprobe-tenant-a-api-key-789"
 export SOFTPROBE_TENANT_B_API_KEY="softprobe-tenant-b-api-key-012"
-export SOFTPROBE_TENANT_A_TOKEN="softprobe-tenant-a-token-345"
-export SOFTPROBE_TENANT_B_TOKEN="softprobe-tenant-b-token-678"
 
 ci_dashboard_checks="$(CI=1 MOCK=1 ARTIFACT_DIR="$TMP_DIR/ci-defaults" bash -c 'source "$1"; printf "%s" "$GRAFANA_CHECK_DASHBOARD_QUERIES"' _ "$SCRIPT")"
 if [[ "$ci_dashboard_checks" != "1" ]]; then
@@ -46,8 +44,8 @@ fi
 
 sample="$TMP_DIR/sample-artifact.txt"
 cat >"$sample" <<'EOF'
-{"fixture_id":"grafana-redaction-fixture","authorization":"Bearer softprobe-tenant-a-token-345","api_key":"softprobe-tenant-a-api-key-789","password":"grafana-admin-password-123","nested":{"client_secret":"softprobe-global-api-key-456","tenant_token":"softprobe-tenant-b-token-678"},"url":"https://grafana.invalid/api/query?api_key=softprobe-global-api-key-456&access_token=softprobe-tenant-a-token-345&tenant_id=tenant-a","tenant_id":"tenant-a"}
-Authorization: Bearer softprobe-tenant-b-token-678
+{"fixture_id":"grafana-redaction-fixture","authorization":"Bearer softprobe-tenant-a-api-key-789","api_key":"softprobe-tenant-a-api-key-789","password":"grafana-admin-password-123","nested":{"client_secret":"softprobe-global-api-key-456","tenant_token":"softprobe-tenant-b-api-key-012"},"url":"https://grafana.invalid/api/query?api_key=softprobe-global-api-key-456&access_token=softprobe-tenant-a-api-key-789&tenant_id=tenant-a","tenant_id":"tenant-a"}
+Authorization: Bearer softprobe-tenant-b-api-key-012
 query=https://grafana.invalid/api/query?password=grafana-admin-password-123&tenant_id=tenant-b
 X-API-Key: softprobe-global-api-key-456
 EOF
@@ -65,8 +63,6 @@ secrets = (
     "softprobe-global-api-key-456",
     "softprobe-tenant-a-api-key-789",
     "softprobe-tenant-b-api-key-012",
-    "softprobe-tenant-a-token-345",
-    "softprobe-tenant-b-token-678",
 )
 leaked = [secret for secret in secrets if secret in text]
 if leaked:
