@@ -69,10 +69,10 @@ type cachedIngestAssertion struct {
 }
 
 type Verifier struct {
-	secret           []byte
+	secret              []byte
 	ingestionResolveURL string
-	httpClient       *http.Client
-	cacheMu          sync.Mutex
+	httpClient          *http.Client
+	cacheMu             sync.Mutex
 	ingestionCache      map[[32]byte]cachedIngestAssertion
 }
 
@@ -93,9 +93,9 @@ func NewVerifier(hmacSecret string) *Verifier {
 		secret = []byte(trimmed)
 	}
 	return &Verifier{
-		secret:           secret,
+		secret:              secret,
 		ingestionResolveURL: resolveIngestionKeyURLFromEnv(),
-		httpClient:       &http.Client{Timeout: 5 * time.Second},
+		httpClient:          &http.Client{Timeout: 5 * time.Second},
 		ingestionCache:      make(map[[32]byte]cachedIngestAssertion),
 	}
 }
