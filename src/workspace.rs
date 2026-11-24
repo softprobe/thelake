@@ -996,7 +996,7 @@ WHERE status = 'active' AND target_kind = 'business_table';"#
 SET status = 'inactive'
 WHERE status = 'active'
   AND target_kind = $1
-  AND target_tables = $2
+  AND COALESCE(target_tables, target_table, '') = $2
   AND spec_id <> $3;"#
             ),
             &[

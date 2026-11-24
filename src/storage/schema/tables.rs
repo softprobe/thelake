@@ -77,11 +77,11 @@ fn score_configs_base_schema() -> &'static Schema {
 }
 
 fn promoted_fields(base: &[Field], columns: &[PromotionColumn]) -> Vec<Field> {
-    let existing: std::collections::HashSet<String> =
+    let mut existing: std::collections::HashSet<String> =
         base.iter().map(|f| f.name().to_ascii_lowercase()).collect();
     columns
         .iter()
-        .filter(|column| !existing.contains(&column.name.to_ascii_lowercase()))
+        .filter(|column| existing.insert(column.name.to_ascii_lowercase()))
         .map(|column| {
             let data_type = match column.data_type {
                 PromotionDataType::String | PromotionDataType::Json => utf8(),
@@ -267,5 +267,30 @@ mod tests {
                 .data_type(),
             &timestamp_ns
         );
+    }
+
+    #[test]
+    fn promoted_fields_deduplicates_duplicate_column_names() {
+        use crate::promotion::{PromotionDataType, PromotionSource};
+
+        let col = |name: &str| PromotionColumn {
+            name: name.to_string(),
+            data_type: PromotionDataType::String,
+            nullable: true,
+            source: PromotionSource::ResourceAttribute {
+                key: "deployment.environment.name".to_string(),
+            },
+        };
+        let schema = TraceTable::schema_with_promoted_columns(&[
+            col("environment"),
+            col("Environment"),
+            col("service_name"),
+        ]);
+        let env_count = schema
+            .fields()
+            .iter()
+            .filter(|f| f.name().eq_ignore_ascii_case("environment"))
+            .count();
+        assert_eq!(env_count, 1);
     }
 }
