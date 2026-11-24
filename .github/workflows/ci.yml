@@ -370,7 +370,9 @@ jobs:
           GH_TOKEN: ${{ secrets.GH_PAT }}
           TARGET_SHA: ${{ needs.publish-ci-image.outputs.target_sha }}
           EXPLORER_BRANCH: ${{ github.head_ref }}
+          DEV_BRANCH: ${{ github.head_ref }}
         run: |
+          set -euo pipefail
           if [ -z "${GH_TOKEN}" ]; then
             echo "GH_PAT secret is not configured; skipping cross-repo dispatch to private softprobe/dev."
             exit 0
@@ -386,8 +388,23 @@ jobs:
               https://github.com/softprobe/explorer.git \
               "refs/heads/${EXPLORER_BRANCH}" | awk 'NR == 1 { print $1 }')"
           fi
+          dev_ref=""
+          if [ -n "${DEV_BRANCH}" ]; then
+            dev_refs="$(git_github ls-remote --heads \
+              https://github.com/softprobe/dev.git \
+              "refs/heads/${DEV_BRANCH}")"
+            if [ -n "${dev_refs}" ]; then
+              dev_ref="${DEV_BRANCH}"
+            fi
+          fi
           dispatch_ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           dispatch_args=(--repo softprobe/dev -f override_repo=thelake -f "override_ref=sha-${TARGET_SHA}")
+          if [ -n "${dev_ref}" ]; then
+            echo "Dispatching system-e2e from matching dev branch ${dev_ref}"
+            dispatch_args+=(--ref "${dev_ref}")
+          else
+            echo "No matching dev branch ${DEV_BRANCH}; dispatching from the default branch"
+          fi
           if [ -n "${explorer_sha}" ]; then
             dispatch_args+=(-f "extra_overrides=explorer=${explorer_sha}")
           fi
