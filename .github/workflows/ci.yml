@@ -369,17 +369,30 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GH_PAT }}
           TARGET_SHA: ${{ needs.publish-ci-image.outputs.target_sha }}
+          EXPLORER_BRANCH: ${{ github.head_ref }}
         run: |
           if [ -z "${GH_TOKEN}" ]; then
             echo "GH_PAT secret is not configured; skipping cross-repo dispatch to private softprobe/dev."
             exit 0
           fi
+          git_github() {
+            local hdr
+            hdr="$(printf 'x-access-token:%s' "${GH_TOKEN}" | base64 | tr -d '\r\n')"
+            git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic ${hdr}" "$@"
+          }
+          explorer_sha=""
+          if [ -n "${EXPLORER_BRANCH}" ]; then
+            explorer_sha="$(git_github ls-remote --heads \
+              https://github.com/softprobe/explorer.git \
+              "refs/heads/${EXPLORER_BRANCH}" | awk 'NR == 1 { print $1 }')"
+          fi
           dispatch_ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          dispatch_args=(--repo softprobe/dev -f override_repo=thelake -f "override_ref=sha-${TARGET_SHA}")
+          if [ -n "${explorer_sha}" ]; then
+            dispatch_args+=(-f "extra_overrides=explorer=${explorer_sha}")
+          fi
           set +e
-          dispatch_err="$(gh workflow run system-e2e.yml \
-            --repo softprobe/dev \
-            -f override_repo=thelake \
-            -f override_ref="sha-${TARGET_SHA}" 2>&1)"
+          dispatch_err="$(gh workflow run system-e2e.yml "${dispatch_args[@]}" 2>&1)"
           rc=$?
           set -e
           if [ "${rc}" -ne 0 ]; then
