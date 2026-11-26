@@ -4,6 +4,13 @@ on:
   workflow_run:
     workflows: [CI]
     types: [completed]
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: "TheLake main commit SHA to deploy (defaults to workflow ref SHA)"
+        required: false
+        default: ""
+        type: string
 
 permissions:
   contents: read
@@ -15,54 +22,38 @@ concurrency:
 jobs:
   publish:
     if: >-
-      github.event.workflow_run.conclusion == 'success' &&
-      github.event.workflow_run.event == 'push' &&
-      github.event.workflow_run.head_branch == 'main'
+      github.repository == 'softprobe/thelake' && (
+        github.event_name == 'workflow_dispatch' ||
+        (github.event.workflow_run.conclusion == 'success' &&
+         github.event.workflow_run.event == 'push' &&
+         github.event.workflow_run.head_branch == 'main')
+      )
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 10
     outputs:
       image_tag: ${{ steps.image.outputs.image_tag }}
-    env:
-      CI: "true"
-      CARGO_INCREMENTAL: "0"
-      DUCKDB_DOWNLOAD_LIB: "1"
 
     steps:
-      - name: Pre-clean workspace permissions
+      - name: Resolve target SHA and staging image tag
+        id: image
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          WORKFLOW_SHA: ${{ github.event.workflow_run.head_sha }}
+          INPUT_SHA: ${{ inputs.sha }}
+          GITHUB_SHA_FALLBACK: ${{ github.sha }}
         run: |
           set -euo pipefail
-          WS="${GITHUB_WORKSPACE:-$PWD}"
-          if [[ -d "$WS" ]]; then
-            sudo rm -rf "$WS/warehouse" || true
-            sudo chown -R "$(id -u):$(id -g)" "$WS" || true
+          if [[ "${EVENT_NAME}" == "workflow_dispatch" ]]; then
+            target_sha="${INPUT_SHA:-${GITHUB_SHA_FALLBACK}}"
+          else
+            target_sha="${WORKFLOW_SHA}"
           fi
-
-      - name: Check out the CI commit
-        uses: actions/checkout@v5
-        with:
-          ref: ${{ github.event.workflow_run.head_sha }}
-
-      - name: Set up Node.js for the embedded Explorer
-        uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
-          cache-dependency-path: packages/thelake-explorer/package-lock.json
-
-      - name: Set up Go for thelake-collector
-        uses: actions/setup-go@v5
-        with:
-          go-version: "1.25"
-          cache-dependency-path: collector/go.sum
-
-      - name: Restore build cache
-        uses: ./.github/actions/thelake-cache
-
-      - name: Bootstrap ubuntu runner
-        uses: ./.github/actions/ubuntu-runner
-
-      - name: Doctor
-        run: make doctor
+          if [[ ! "${target_sha}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::invalid target commit SHA: ${target_sha}"
+            exit 1
+          fi
+          echo "source_sha=${target_sha}" >> "$GITHUB_OUTPUT"
+          echo "image_tag=staging-${target_sha}" >> "$GITHUB_OUTPUT"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -73,24 +64,23 @@ jobs:
           username: softprobe
           password: ${{ secrets.DOCKER_HUB_PASSWORD }}
 
-      - name: Set the staging image tag
-        id: image
+      - name: Promote verified GHCR CI images to Docker Hub
         env:
-          WORKFLOW_SHA: ${{ github.event.workflow_run.head_sha }}
-        run: echo "image_tag=staging-${WORKFLOW_SHA}" >> "$GITHUB_OUTPUT"
-
-      - name: Build TheLake release image
-        run: make build-release
-
-      - name: Publish both staging images
-        env:
+          SOURCE_SHA: ${{ steps.image.outputs.source_sha }}
           IMAGE_TAG: ${{ steps.image.outputs.image_tag }}
+          REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-          make publish TAG="${IMAGE_TAG}" TAG_LATEST=0
-          make publish-collector TAG="${IMAGE_TAG}" TAG_LATEST=0
-          docker buildx imagetools inspect "softprobe/thelake:${IMAGE_TAG}" >/dev/null
-          docker buildx imagetools inspect "softprobe/thelake-collector:${IMAGE_TAG}" >/dev/null
+          thelake_src="ghcr.io/${REPO}:sha-${SOURCE_SHA}"
+          collector_src="ghcr.io/${REPO}-collector:sha-${SOURCE_SHA}"
+          for src in "${thelake_src}" "${collector_src}"; do
+            if ! docker buildx imagetools inspect "${src}" >/dev/null 2>&1; then
+              echo "::error::Missing verified CI image ${src}. Run CI on main first."
+              exit 1
+            fi
+          done
+          docker buildx imagetools create --tag "softprobe/thelake:${IMAGE_TAG}" "${thelake_src}"
+          docker buildx imagetools create --tag "softprobe/thelake-collector:${IMAGE_TAG}" "${collector_src}"
 
   deploy:
     needs: publish
@@ -183,27 +173,10 @@ jobs:
         working-directory: deployment-k8s
         run: python3 scripts/test_update_thelake_staging_image.py
 
-      - name: Update GitOps image pins
+      - name: Update GitOps image pins locally
         if: steps.freshness.outputs.deployed == 'true'
         working-directory: deployment-k8s
         run: python3 scripts/update_thelake_staging_image.py "${IMAGE_TAG}"
-
-      - name: Commit the GitOps image pins
-        if: steps.freshness.outputs.deployed == 'true'
-        working-directory: deployment-k8s
-        env:
-          GH_PAT: ${{ secrets.GH_PAT }}
-        run: |
-          set -euo pipefail
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add gcp/staging/explorer/thelake.yaml
-          if git diff --cached --quiet; then
-            echo "The GitOps manifest already records ${IMAGE_TAG}."
-            exit 0
-          fi
-          git commit -m "chore(staging): deploy TheLake ${IMAGE_TAG} (Refs softprobe/dev#199)"
-          git push origin HEAD:main
 
       - name: Authenticate to Google Cloud
         if: steps.freshness.outputs.deployed == 'true'
@@ -237,6 +210,8 @@ jobs:
           ]
           Path("/tmp/staging-apply.yaml").write_text("\n---\n".join(kept))
           PY
+          # Kubernetes Jobs have immutable spec.template; replace cleanly on each deploy.
+          kubectl -n staging delete job/thelake-apply-llm-v1 --ignore-not-found
           kubectl apply -f /tmp/staging-apply.yaml
           kubectl -n staging delete deployment/thelake-collector service/thelake-collector --ignore-not-found
           kubectl -n staging rollout status deployment/thelake --timeout=5m
@@ -249,6 +224,24 @@ jobs:
           collector_image=$(kubectl -n staging get deployment/thelake -o jsonpath='{.spec.template.spec.containers[?(@.name=="thelake-collector")].image}')
           test "${app_image}" = "softprobe/thelake:${IMAGE_TAG}"
           test "${collector_image}" = "softprobe/thelake-collector:${IMAGE_TAG}"
+
+      - name: Commit the GitOps image pins after successful rollout
+        if: steps.freshness.outputs.deployed == 'true'
+        working-directory: deployment-k8s
+        env:
+          GH_PAT: ${{ secrets.GH_PAT }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add gcp/staging/explorer/thelake.yaml
+          if git diff --cached --quiet; then
+            echo "The GitOps manifest already records ${IMAGE_TAG}."
+            exit 0
+          fi
+          git commit -m "chore(staging): deploy TheLake ${IMAGE_TAG} (Refs softprobe/dev#199)"
+          git pull --rebase origin main
+          git push origin HEAD:main
 
   wait-for-blackbox-e2e:
     name: Wait for canonical Blackbox staging E2E

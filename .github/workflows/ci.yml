@@ -360,7 +360,7 @@ jobs:
   dispatch-system-e2e:
     name: Trigger Softprobe System E2E
     needs: publish-ci-image
-    if: github.repository == 'softprobe/thelake'
+    if: github.repository == 'softprobe/thelake' && github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     permissions:
       contents: read
