@@ -1,6 +1,6 @@
 name: CI
 
-# Pre-merge / main push: unit checks, two DuckLake E2E jobs, and Explorer UI E2E.
+# Continuous Integration (PR and main): lint, unit tests, DuckLake/Explorer E2E, GHCR images, and pre-merge local System E2E.
 # Dev Cargo profile only (clippy + tests share one compile). Warm SLO ≤ 18m.
 # Cache: ~/.cache/thelake via Make + actions/cache on registry + target.
 on:
@@ -358,7 +358,7 @@ jobs:
           DOCKER_CONFIG="${tmp_docker_config}" docker manifest inspect "${COLLECTOR_REF}" >/dev/null
 
   dispatch-system-e2e:
-    name: Trigger Softprobe System E2E
+    name: Pre-merge System E2E (local)
     needs: publish-ci-image
     if: github.repository == 'softprobe/thelake' && github.event_name == 'pull_request'
     runs-on: ubuntu-latest
