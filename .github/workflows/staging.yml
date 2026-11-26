@@ -1,4 +1,4 @@
-name: Deploy TheLake staging
+name: CD (Staging)
 
 on:
   workflow_run:
@@ -21,6 +21,7 @@ concurrency:
 
 jobs:
   publish:
+    name: Promote staging images
     if: >-
       github.repository == 'softprobe/thelake' && (
         github.event_name == 'workflow_dispatch' ||
@@ -83,6 +84,7 @@ jobs:
           docker buildx imagetools create --tag "softprobe/thelake-collector:${IMAGE_TAG}" "${collector_src}"
 
   deploy:
+    name: Deploy to staging
     needs: publish
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -244,7 +246,7 @@ jobs:
           git push origin HEAD:main
 
   wait-for-blackbox-e2e:
-    name: Wait for canonical Blackbox staging E2E
+    name: Post-deploy staging E2E
     needs: deploy
     if: needs.deploy.outputs.deployed == 'true'
     runs-on: ubuntu-latest
