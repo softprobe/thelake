@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Load every session detail through the public API and validate full payloads.
 
-Set THELAKE_API_TOKEN and pass the inclusive search window. Provide one known
+Set SOFTPROBE_API_KEY and pass the inclusive search window. Provide one known
 inline session and one Parquet-backed session to make both storage paths part of
 the check, even when one of them falls outside the search window.
 """
@@ -25,11 +25,11 @@ class Failure:
     status: str
 
 
-def request_json(url: str, token: str, payload: dict | None = None) -> dict:
+def request_json(url: str, softprobe_api_key: str, payload: dict | None = None) -> dict:
     data = None if payload is None else json.dumps(payload).encode()
     headers = {
         "Accept": "application/json",
-        "Authorization": f"Bearer {token}",
+        "Authorization": f"Bearer {softprobe_api_key}",
     }
     if data is not None:
         headers["Content-Type"] = "application/json"
@@ -47,7 +47,7 @@ def request_json(url: str, token: str, payload: dict | None = None) -> dict:
 
 
 def fetch_session_ids(
-    base_url: str, token: str, start: str, end: str
+    base_url: str, softprobe_api_key: str, start: str, end: str
 ) -> tuple[list[str], int]:
     session_ids: list[str] = []
     cursor: str | None = None
@@ -64,7 +64,7 @@ def fetch_session_ids(
             "limit": 100,
             "cursor": cursor,
         }
-        response = request_json(f"{base_url}/v1/sessions/search", token, body)
+        response = request_json(f"{base_url}/v1/sessions/search", softprobe_api_key, body)
         if response.get("cursor_supported") is not True:
             raise RuntimeError("session search does not support the cursor order required to enumerate all sessions")
         pages += 1
@@ -131,17 +131,17 @@ def validate_recording_payload(session_id: str, recording: dict) -> Failure | No
 
 
 def validate_detail(
-    base_url: str, token: str, session_id: str, require_event: bool = False
+    base_url: str, softprobe_api_key: str, session_id: str, require_event: bool = False
 ) -> tuple[Failure | None, str]:
     encoded = urllib.parse.quote(session_id, safe="")
     try:
-        detail = request_json(f"{base_url}/v1/sessions/{encoded}", token)
+        detail = request_json(f"{base_url}/v1/sessions/{encoded}", softprobe_api_key)
     except RuntimeError as error:
         if str(error) != "HTTP 404":
             return Failure(session_id, str(error)), "detail"
         try:
             recording = request_json(
-                f"{base_url}/v1/sessions/{encoded}/recording?limit=1000", token
+                f"{base_url}/v1/sessions/{encoded}/recording?limit=1000", softprobe_api_key
             )
         except RuntimeError as recording_error:
             return Failure(session_id, f"detail {error}; recording {recording_error}"), "recording"
@@ -157,16 +157,16 @@ def main() -> int:
     parser.add_argument("--inline-session", required=True, help="Known session containing catalog-inlined rows")
     parser.add_argument("--parquet-session", required=True, help="Known session backed by Parquet")
     parser.add_argument("--workers", type=int, default=4)
-    parser.add_argument("--token", default=os.environ.get("THELAKE_API_TOKEN"))
+    parser.add_argument("--softprobe-api-key", default=os.environ.get("SOFTPROBE_API_KEY"))
     args = parser.parse_args()
-    if not args.token:
-        parser.error("set THELAKE_API_TOKEN or pass --token")
+    if not args.softprobe_api_key:
+        parser.error("set SOFTPROBE_API_KEY or pass --softprobe-api-key")
     if args.workers < 1:
         parser.error("--workers must be positive")
 
     base_url = args.base_url.rstrip("/")
     try:
-        session_ids, pages = fetch_session_ids(base_url, args.token, args.start, args.end)
+        session_ids, pages = fetch_session_ids(base_url, args.softprobe_api_key, args.start, args.end)
     except RuntimeError as error:
         print(f"session search failed: {error}", file=sys.stderr)
         return 1
@@ -184,7 +184,7 @@ def main() -> int:
             executor.submit(
                 validate_detail,
                 base_url,
-                args.token,
+                args.softprobe_api_key,
                 session_id,
                 session_id in required_event_sessions,
             )

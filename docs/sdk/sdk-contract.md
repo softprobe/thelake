@@ -12,15 +12,15 @@ or score bodies).
 
 ## Configuration
 
-Required:
+Required for OTLP trace export:
 
-- `publicKey` / `public_key`: Softprobe bearer token
-- `baseUrl` / `base_url`: Softprobe runtime HTTP base (used for scores)
+- `ingestionKey` / `ingestion_key`: Agent Ingestion Key for telemetry writes. The environment variable is `INGESTION_KEY`; the key is bound to an Agent and cannot read sessions.
+- `SOFTPROBE_API_KEY`: separate API key for read/query requests. Do not use an Agent Ingestion Key for session reads.
 
 Optional:
 
-- `otlpEndpoint` / `otlp_endpoint`: OTLP HTTP traces endpoint (defaults to
-  `{baseUrl}/v1/traces`; protobuf payload)
+- `baseUrl` / `base_url`: Softprobe score API base; it does not select the OTLP traces destination.
+- `otlpEndpoint` / `otlp_endpoint` or `otlp.tracesEndpoint`: OTLP HTTP traces endpoint (defaults to the production traces endpoint; protobuf payload)
 
 - `serviceName` / `service_name` (default: `softprobe-app`)
 - `serviceVersion` / `service_version`

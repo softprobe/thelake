@@ -12,17 +12,21 @@ Softprobe mirrors Langfuse’s AI SDK approach:
 pnpm add ai @ai-sdk/otel @softprobe/vercel-ai-sdk @softprobe/tracing
 ```
 
+Configure the Agent Ingestion Key and OTLP endpoint:
+
+```bash
+export INGESTION_KEY="<Agent Ingestion Key>"
+export OTEL_EXPORTER_OTLP_TRACES_ENDPOINT="https://thelake.softprobe.ai/v1/traces"
+export OTEL_EXPORTER_OTLP_TRACES_HEADERS="Authorization=Bearer ${INGESTION_KEY}"
+export OTEL_EXPORTER_OTLP_TRACES_PROTOCOL="http/protobuf"
+```
+
 ```ts
 import { registerTelemetry } from "ai";
 import { SoftprobeClient } from "@softprobe/tracing";
 import { SoftprobeVercelAiSdkIntegration } from "@softprobe/vercel-ai-sdk";
 
-const sp = new SoftprobeClient({
-  publicKey: process.env.SOFTPROBE_PUBLIC_KEY!,
-  baseUrl: process.env.SOFTPROBE_BASE_URL!,
-  otlpEndpoint: process.env.SOFTPROBE_OTLP_ENDPOINT!,
-  registerProvider: true, // or false when using an app-owned NodeSDK
-});
+const sp = SoftprobeClient.fromEnv({ registerProvider: true });
 
 registerTelemetry(
   new SoftprobeVercelAiSdkIntegration({ tracer: sp.tracer }),

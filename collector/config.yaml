@@ -22,7 +22,7 @@ processors:
     limit_mib: 512
     spike_limit_mib: 128
   sessioncorrelation:
-    assertion_hmac_secret: ${env:SOFTPROBE_ASSERTION_HMAC_SECRET}
+    assertion_hmac_secret: ${env:ASSERTION_HMAC_SECRET}
     pending_window: ${env:THELAKE_CORRELATION_PENDING_WINDOW:-2s}
     resolved_ttl: 10m
     shard_count: 64

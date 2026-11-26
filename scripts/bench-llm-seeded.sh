@@ -13,12 +13,12 @@ IDLE_SECS="${IDLE_SECS:-60}"
 IDLE_COOLDOWN_SECS="${IDLE_COOLDOWN_SECS:-15}"
 SESSION_QPS="${SESSION_QPS:-2}"
 LLM_INTERVAL_MS="${LLM_INTERVAL_MS:-500}"
-API_TOKEN="${API_TOKEN:-test-token}"
+SOFTPROBE_API_KEY="${SOFTPROBE_API_KEY:?set SOFTPROBE_API_KEY to a workspace API key}"
 REPORT_JSON="${REPORT_JSON:-/tmp/thelake-bench-llm-seeded.json}"
 TMP_CONFIG="/tmp/thelake-bench-llm-seeded.yaml"
 LOG="/tmp/thelake-bench-llm-seeded.log"
-# Local Bearer → default lake (docs/compat/auth.md); required for /v1/* without assertion JWT.
-export SOFTPROBE_DEFAULT_WORKSPACE_ID="${SOFTPROBE_DEFAULT_WORKSPACE_ID:-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee}"
+# Workspace identity for the seeded benchmark scope.
+export BENCH_WORKSPACE_ID="${BENCH_WORKSPACE_ID:-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee}"
 export SOFTPROBE_ADMIN_API_KEY="${SOFTPROBE_ADMIN_API_KEY:-llm-bench-admin}"
 
 if [[ ! -d "${SEED_DIR}" ]]; then
@@ -94,7 +94,7 @@ docker exec ducklake-postgres psql -U ducklake -d ducklake -c \
 
 echo "Loading seed from ${SEED_DIR}…"
 SEED_FORCE=1 CONFIG_FILE="${TMP_CONFIG}" SEED_DIR="${SEED_DIR}" \
-  SEED_WORKSPACE_ID="${SOFTPROBE_DEFAULT_WORKSPACE_ID}" \
+  SEED_WORKSPACE_ID="${BENCH_WORKSPACE_ID}" \
   ./scripts/seed-lake-from-parquet.sh
 
 echo "Starting thelake on :${PORT}…"
@@ -104,7 +104,7 @@ if [[ ! -x "${BIN}" ]]; then
   echo "release thelake missing at ${BIN}; building…" >&2
   make build-release
 fi
-SOFTPROBE_DEFAULT_WORKSPACE_ID="${SOFTPROBE_DEFAULT_WORKSPACE_ID}" \
+BENCH_WORKSPACE_ID="${BENCH_WORKSPACE_ID}" \
 SOFTPROBE_ADMIN_API_KEY="${SOFTPROBE_ADMIN_API_KEY}" \
   CONFIG_FILE="${TMP_CONFIG}" \
   nohup "${BIN}" >"${LOG}" 2>&1 &
@@ -140,14 +140,14 @@ if [[ -z "${THELAKE_PID}" ]]; then
 fi
 echo "thelake pid=${THELAKE_PID}"
 
-echo "Provisioning scope ${SOFTPROBE_DEFAULT_WORKSPACE_ID}…"
+echo "Provisioning scope ${BENCH_WORKSPACE_ID}…"
 # Hints must match the bench CONFIG_FILE warehouse (isolated or shared).
 PROVISION_SCHEMA="${SCHEMA}"
 PROVISION_DATA_PATH="${WAREHOUSE}/"
 curl -sf -X POST "http://127.0.0.1:${PORT}/v1/workspaces" \
   -H "Authorization: Bearer ${SOFTPROBE_ADMIN_API_KEY}" \
   -H "Content-Type: application/json" \
-  -d "{\"workspaceId\":\"${SOFTPROBE_DEFAULT_WORKSPACE_ID}\",\"storageHints\":{\"ducklakeMetadataSchema\":\"${PROVISION_SCHEMA}\",\"ducklakeDataPath\":\"${PROVISION_DATA_PATH}\"}}" \
+  -d "{\"workspaceId\":\"${BENCH_WORKSPACE_ID}\",\"storageHints\":{\"ducklakeMetadataSchema\":\"${PROVISION_SCHEMA}\",\"ducklakeDataPath\":\"${PROVISION_DATA_PATH}\"}}" \
   >/tmp/thelake-bench-provision.json \
   || { echo "provision failed"; cat /tmp/thelake-bench-provision.json 2>/dev/null; tail -40 "${LOG}"; exit 1; }
 cat /tmp/thelake-bench-provision.json
@@ -173,7 +173,7 @@ fi
 echo "Running bench_llm_load.py…"
 python3 scripts/perf/bench_llm_load.py \
   --base-url "http://127.0.0.1:${PORT}" \
-  --api-token "${API_TOKEN}" \
+  --softprobe-api-key "${SOFTPROBE_API_KEY}" \
   --duration "${DURATION}" \
   --idle-secs "${IDLE_SECS}" \
   --idle-cooldown-secs "${IDLE_COOLDOWN_SECS}" \

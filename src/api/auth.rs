@@ -41,8 +41,8 @@ pub(crate) fn authorize_agent_assertion_request(
     }
 }
 
-/// Prefer `X-Softprobe-Assertion` (sp-llm#39). Fall back to Bearer assertion JWT,
-/// then optional `SOFTPROBE_DEFAULT_WORKSPACE_ID`, then Softprobe auth service.
+/// Prefer `X-Softprobe-Assertion`, then Bearer assertion JWT or a Softprobe API Key
+/// resolved by the Softprobe auth service.
 pub async fn runtime_auth_middleware(
     State(state): State<AppState>,
     req: Request,
@@ -82,7 +82,7 @@ pub async fn runtime_auth_middleware(
 
     let token = parse_bearer(auth).ok_or(StatusCode::UNAUTHORIZED)?;
 
-    // Machine ingest keys may be long-lived Softprobe assertion JWTs (Explorer
+    // Machine ingestion keys may be long-lived Softprobe assertion JWTs (Explorer
     // workspace keys). Prefer verifying those before the Softprobe auth HTTP path
     // (which returns Softprobe numeric ids that are not DuckLake scope_ids).
     if token.chars().filter(|c| *c == '.').count() == 2 {
@@ -100,33 +100,25 @@ pub async fn runtime_auth_middleware(
     }
 
     if token.starts_with("spk_") {
-        if !crate::softprobe_assertion::is_ingest_key_resolve_configured() {
+        if !crate::softprobe_assertion::is_ingestion_key_resolve_configured() {
             return Err(StatusCode::UNAUTHORIZED);
         }
         if !is_ingest_route(req.method(), path) {
             return Err(StatusCode::FORBIDDEN);
         }
-        let claims = crate::softprobe_assertion::resolve_ingest_key(&token)
+        let claims = crate::softprobe_assertion::resolve_ingestion_key(&token)
             .await
             .map_err(|err| match err {
-                crate::softprobe_assertion::IngestKeyResolveError::Unauthorized
-                | crate::softprobe_assertion::IngestKeyResolveError::Unconfigured => {
+                crate::softprobe_assertion::IngestionKeyResolveError::Unauthorized
+                | crate::softprobe_assertion::IngestionKeyResolveError::Unconfigured => {
                     StatusCode::UNAUTHORIZED
                 }
-                crate::softprobe_assertion::IngestKeyResolveError::Upstream(_) => {
+                crate::softprobe_assertion::IngestionKeyResolveError::Upstream(_) => {
                     StatusCode::BAD_GATEWAY
                 }
             })?;
         authorize_agent_assertion_request(&claims, req.method(), path)?;
         let info = crate::softprobe_assertion::workspace_auth_from_assertion(&claims)
-            .map_err(|_| StatusCode::FORBIDDEN)?;
-        return Ok(run_workspace_request(req, next, info).await);
-    }
-
-    // Legacy direct-to-thelake clients: no assertion header. Optional default
-    // lake routes them onto a configured MAP-ready scope (Bearer still required).
-    if let Some(default_key) = crate::softprobe_assertion::default_workspace_id_from_env() {
-        let info = crate::softprobe_assertion::workspace_auth_for_default_lake(&default_key)
             .map_err(|_| StatusCode::FORBIDDEN)?;
         return Ok(run_workspace_request(req, next, info).await);
     }
@@ -327,20 +319,14 @@ mod tests {
 
     fn configure_auth_environment() -> EnvSnapshot {
         let snapshot = EnvSnapshot::capture(&[
-            "SOFTPROBE_ASSERTION_HMAC_SECRET",
             "ASSERTION_HMAC_SECRET",
-            "SOFTPROBE_DEFAULT_WORKSPACE_ID",
-            "THELAKE_DEFAULT_WORKSPACE_ID",
             "SOFTPROBE_ADMIN_API_KEY",
-            "SOFTPROBE_INGEST_KEY_RESOLVE_URL",
+            "INGESTION_KEY_RESOLVE_URL",
             "SOFTPROBE_EXPLORER_URL",
         ]);
-        std::env::remove_var("SOFTPROBE_ASSERTION_HMAC_SECRET");
         std::env::set_var("ASSERTION_HMAC_SECRET", TEST_SECRET);
-        std::env::set_var("SOFTPROBE_DEFAULT_WORKSPACE_ID", TEST_WORKSPACE);
-        std::env::remove_var("THELAKE_DEFAULT_WORKSPACE_ID");
         std::env::set_var("SOFTPROBE_ADMIN_API_KEY", "test-admin-key");
-        std::env::remove_var("SOFTPROBE_INGEST_KEY_RESOLVE_URL");
+        std::env::remove_var("INGESTION_KEY_RESOLVE_URL");
         std::env::remove_var("SOFTPROBE_EXPLORER_URL");
         snapshot
     }
@@ -607,19 +593,6 @@ mod tests {
         assert_eq!(
             response_status(
                 app.clone(),
-                Method::GET,
-                "/v1/meta",
-                &[("authorization", "Bearer legacy-local-token")],
-                None,
-            )
-            .await,
-            StatusCode::OK,
-            "legacy direct-to-TheLake Bearer fallback must remain available"
-        );
-
-        assert_eq!(
-            response_status(
-                app.clone(),
                 Method::POST,
                 "/v1/workspaces",
                 &[
@@ -794,10 +767,12 @@ mod tests {
         );
 
         wiremock::Mock::given(wiremock::matchers::method("POST"))
-            .and(wiremock::matchers::path("/api/internal/ingest-key/resolve"))
+            .and(wiremock::matchers::path(
+                "/api/internal/ingestion-key/resolve",
+            ))
             .and(wiremock::matchers::header_exists("x-softprobe-assertion"))
             .and(wiremock::matchers::body_json(serde_json::json!({
-                "apiKey": "spk_live_wiremock_valid"
+                "ingestionKey": "spk_live_wiremock_valid"
             })))
             .respond_with(
                 wiremock::ResponseTemplate::new(200)
@@ -808,9 +783,11 @@ mod tests {
             .await;
 
         wiremock::Mock::given(wiremock::matchers::method("POST"))
-            .and(wiremock::matchers::path("/api/internal/ingest-key/resolve"))
+            .and(wiremock::matchers::path(
+                "/api/internal/ingestion-key/resolve",
+            ))
             .and(wiremock::matchers::body_json(serde_json::json!({
-                "apiKey": "spk_live_wiremock_unknown"
+                "ingestionKey": "spk_live_wiremock_unknown"
             })))
             .respond_with(wiremock::ResponseTemplate::new(401))
             .expect(1)

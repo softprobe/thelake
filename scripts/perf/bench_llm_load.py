@@ -92,9 +92,9 @@ class SessionPool:
         return f"miss-{random.randrange(1_000_000)}"
 
 
-def _auth_headers(token: str) -> dict[str, str]:
+def _auth_headers(softprobe_api_key: str) -> dict[str, str]:
     return {
-        "Authorization": f"Bearer {token}",
+        "Authorization": f"Bearer {softprobe_api_key}",
         "Content-Type": "application/json",
     }
 
@@ -102,7 +102,7 @@ def _auth_headers(token: str) -> dict[str, str]:
 def ingest_loop(
     *,
     base_url: str,
-    token: str,
+    softprobe_api_key: str,
     deadline: float,
     session_qps: float,
     traces_per_session: int,
@@ -124,7 +124,7 @@ def ingest_loop(
         try:
             r = session.post(
                 f"{base_url}/v1/traces",
-                headers=_auth_headers(token),
+                headers=_auth_headers(softprobe_api_key),
                 json=body,
                 timeout=60,
             )
@@ -159,7 +159,7 @@ def llm_loop(
     *,
     name: str,
     base_url: str,
-    token: str,
+    softprobe_api_key: str,
     deadline: float,
     interval_ms: int,
     concurrency: int,
@@ -179,7 +179,7 @@ def llm_loop(
             if name == "llm_session_search":
                 r = session.post(
                     f"{base_url}/v1/llm/sessions/search",
-                    headers=_auth_headers(token),
+                    headers=_auth_headers(softprobe_api_key),
                     json={"from": from_ts, "to": to_ts, "limit": 50},
                     timeout=60,
                 )
@@ -187,7 +187,7 @@ def llm_loop(
                 sid = pool.pick()
                 r = session.get(
                     f"{base_url}/v1/llm/sessions/{sid}",
-                    headers=_auth_headers(token),
+                    headers=_auth_headers(softprobe_api_key),
                     timeout=60,
                 )
                 # 404 on intentional miss is still a successful HTTP probe
@@ -264,7 +264,7 @@ def _format_cpu(label: str, summary: dict[str, Any]) -> str:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--base-url", required=True)
-    ap.add_argument("--api-token", default="test-token")
+    ap.add_argument("--softprobe-api-key", default=os.environ.get("SOFTPROBE_API_KEY"))
     ap.add_argument("--duration", type=int, default=60)
     ap.add_argument("--warmup-secs", type=int, default=5)
     ap.add_argument(
@@ -308,9 +308,11 @@ def main() -> int:
     )
     ap.add_argument("--max-error-rate", type=float, default=0.05)
     args = ap.parse_args()
+    if not args.softprobe_api_key:
+        ap.error("set SOFTPROBE_API_KEY or pass --softprobe-api-key")
 
     base = args.base_url.rstrip("/")
-    token = args.api_token
+    softprobe_api_key = args.softprobe_api_key
     wanted = {w.strip() for w in args.workloads.split(",") if w.strip()}
     fr, to = args.from_ts, args.to_ts
     if not fr or not to:
@@ -368,7 +370,7 @@ def main() -> int:
                 target=ingest_loop,
                 kwargs=dict(
                     base_url=base,
-                    token=token,
+                    softprobe_api_key=softprobe_api_key,
                     deadline=deadline,
                     session_qps=args.session_qps,
                     traces_per_session=args.traces_per_session,
@@ -387,7 +389,7 @@ def main() -> int:
                 kwargs=dict(
                     name="llm_session_search",
                     base_url=base,
-                    token=token,
+                    softprobe_api_key=softprobe_api_key,
                     deadline=deadline,
                     interval_ms=args.llm_interval_ms,
                     concurrency=args.llm_concurrency,
@@ -405,7 +407,7 @@ def main() -> int:
                 kwargs=dict(
                     name="llm_session_detail",
                     base_url=base,
-                    token=token,
+                    softprobe_api_key=softprobe_api_key,
                     deadline=deadline,
                     interval_ms=args.llm_interval_ms,
                     concurrency=args.llm_concurrency,

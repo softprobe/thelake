@@ -18,14 +18,15 @@ pub async fn authenticated_router(
     workspace_id: &str,
     auth_success: bool,
 ) -> (Router, AppState, MockServer) {
-    authenticated_router_with_expected_token(config, workspace_id, auth_success, None).await
+    authenticated_router_with_expected_softprobe_api_key(config, workspace_id, auth_success, None)
+        .await
 }
 
-async fn authenticated_router_with_expected_token(
+async fn authenticated_router_with_expected_softprobe_api_key(
     config: Arc<Config>,
     workspace_id: &str,
     auth_success: bool,
-    expected_token: Option<&str>,
+    expected_softprobe_api_key: Option<&str>,
 ) -> (Router, AppState, MockServer) {
     let mock = MockServer::start().await;
     let body = if auth_success {
@@ -37,8 +38,10 @@ async fn authenticated_router_with_expected_token(
         serde_json::json!({"success": false})
     };
     let request = Mock::given(method("POST")).and(path("/"));
-    let request = match expected_token {
-        Some(token) => request.and(body_json(serde_json::json!({ "apiKey": token }))),
+    let request = match expected_softprobe_api_key {
+        Some(softprobe_api_key) => request.and(body_json(
+            serde_json::json!({ "softprobeApiKey": softprobe_api_key }),
+        )),
         None => request,
     };
     request

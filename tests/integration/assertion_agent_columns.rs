@@ -125,7 +125,7 @@ async fn response_json(resp: axum::response::Response) -> Value {
 }
 
 async fn assertion_router(secret: &str) -> (Router, AppState, TempDir) {
-    std::env::set_var("SOFTPROBE_ASSERTION_HMAC_SECRET", secret);
+    std::env::set_var("ASSERTION_HMAC_SECRET", secret);
     let temp = TempDir::new().expect("tempdir");
     let control = ControlPlaneRuntime {
         resolver: Resolver::new("http://127.0.0.1:9/", Duration::from_secs(60)),

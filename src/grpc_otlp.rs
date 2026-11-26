@@ -36,16 +36,16 @@ impl TraceService for GrpcTraceService {
             .and_then(parse_bearer)
             .ok_or_else(|| Status::unauthenticated("missing or invalid authorization metadata"))?;
         let auth = if token.starts_with("spk_")
-            && crate::softprobe_assertion::is_ingest_key_resolve_configured()
+            && crate::softprobe_assertion::is_ingestion_key_resolve_configured()
         {
-            let claims = crate::softprobe_assertion::resolve_ingest_key(&token)
+            let claims = crate::softprobe_assertion::resolve_ingestion_key(&token)
                 .await
                 .map_err(|err| match err {
-                    crate::softprobe_assertion::IngestKeyResolveError::Unauthorized
-                    | crate::softprobe_assertion::IngestKeyResolveError::Unconfigured => {
+                    crate::softprobe_assertion::IngestionKeyResolveError::Unauthorized
+                    | crate::softprobe_assertion::IngestionKeyResolveError::Unconfigured => {
                         Status::unauthenticated("invalid ingestion key")
                     }
-                    crate::softprobe_assertion::IngestKeyResolveError::Upstream(msg) => {
+                    crate::softprobe_assertion::IngestionKeyResolveError::Upstream(msg) => {
                         Status::unavailable(msg)
                     }
                 })?;

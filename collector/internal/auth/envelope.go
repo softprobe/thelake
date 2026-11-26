@@ -69,19 +69,19 @@ type cachedIngestAssertion struct {
 }
 
 type Verifier struct {
-	secret           []byte
-	ingestResolveURL string
-	httpClient       *http.Client
-	cacheMu          sync.Mutex
-	ingestCache      map[[32]byte]cachedIngestAssertion
+	secret              []byte
+	ingestionResolveURL string
+	httpClient          *http.Client
+	cacheMu             sync.Mutex
+	ingestionCache      map[[32]byte]cachedIngestAssertion
 }
 
-func resolveIngestKeyURLFromEnv() string {
-	if raw := strings.TrimSpace(os.Getenv("SOFTPROBE_INGEST_KEY_RESOLVE_URL")); raw != "" {
+func resolveIngestionKeyURLFromEnv() string {
+	if raw := strings.TrimSpace(os.Getenv("INGESTION_KEY_RESOLVE_URL")); raw != "" {
 		return raw
 	}
 	if base := strings.TrimSpace(os.Getenv("SOFTPROBE_EXPLORER_URL")); base != "" {
-		return strings.TrimRight(base, "/") + "/api/internal/ingest-key/resolve"
+		return strings.TrimRight(base, "/") + "/api/internal/ingestion-key/resolve"
 	}
 	return ""
 }
@@ -93,10 +93,10 @@ func NewVerifier(hmacSecret string) *Verifier {
 		secret = []byte(trimmed)
 	}
 	return &Verifier{
-		secret:           secret,
-		ingestResolveURL: resolveIngestKeyURLFromEnv(),
-		httpClient:       &http.Client{Timeout: 5 * time.Second},
-		ingestCache:      make(map[[32]byte]cachedIngestAssertion),
+		secret:              secret,
+		ingestionResolveURL: resolveIngestionKeyURLFromEnv(),
+		httpClient:          &http.Client{Timeout: 5 * time.Second},
+		ingestionCache:      make(map[[32]byte]cachedIngestAssertion),
 	}
 }
 
@@ -104,8 +104,8 @@ func (v *Verifier) HasSecret() bool {
 	return v != nil && len(v.secret) > 0
 }
 
-func (v *Verifier) canResolveIngestKeys() bool {
-	return v.HasSecret() && v.ingestResolveURL != ""
+func (v *Verifier) canResolveIngestionKeys() bool {
+	return v.HasSecret() && v.ingestionResolveURL != ""
 }
 
 type rawClaims struct {
@@ -174,13 +174,13 @@ func ParseInbound(md client.Metadata, verifier *Verifier, now time.Time) (AuthEn
 	}
 
 	if strings.HasPrefix(token, "spk_") {
-		if !verifier.canResolveIngestKeys() {
+		if !verifier.canResolveIngestionKeys() {
 			return AuthEnvelope{}, status.Error(
 				codes.Unauthenticated,
 				"Explorer API keys must be exchanged at the gateway before reaching the collector",
 			)
 		}
-		resolved, err := resolveIngestKey(token, verifier, now)
+		resolved, err := resolveIngestionKey(token, verifier, now)
 		if err != nil {
 			return AuthEnvelope{}, err
 		}
@@ -242,7 +242,7 @@ func signServiceAssertion(secret []byte, now time.Time) (string, error) {
 		"aud":          "sp-explorer",
 		"sub":          "thelake-collector",
 		"workspace_id": "00000000-0000-0000-0000-000000000000",
-		"capabilities": []string{"resolve_ingest_key"},
+		"capabilities": []string{"resolve_ingestion_key"},
 		"exp":          now.Unix() + 60,
 	})
 	if err != nil {
@@ -255,15 +255,15 @@ func signServiceAssertion(secret []byte, now time.Time) (string, error) {
 	return signingInput + "." + sig, nil
 }
 
-func resolveIngestKey(token string, verifier *Verifier, now time.Time) (cachedIngestAssertion, error) {
+func resolveIngestionKey(token string, verifier *Verifier, now time.Time) (cachedIngestAssertion, error) {
 	key := sha256.Sum256([]byte(token))
 	verifier.cacheMu.Lock()
-	if entry, ok := verifier.ingestCache[key]; ok {
+	if entry, ok := verifier.ingestionCache[key]; ok {
 		if now.Before(entry.cacheUntil) && (entry.expUnix == 0 || entry.expUnix >= now.Unix()) {
 			verifier.cacheMu.Unlock()
 			return entry, nil
 		}
-		delete(verifier.ingestCache, key)
+		delete(verifier.ingestionCache, key)
 	}
 	verifier.cacheMu.Unlock()
 
@@ -272,12 +272,12 @@ func resolveIngestKey(token string, verifier *Verifier, now time.Time) (cachedIn
 		return cachedIngestAssertion{}, status.Errorf(codes.Internal, "failed to sign service assertion: %v", err)
 	}
 
-	reqBody, err := json.Marshal(map[string]string{"apiKey": token})
+	reqBody, err := json.Marshal(map[string]string{"ingestionKey": token})
 	if err != nil {
 		return cachedIngestAssertion{}, status.Errorf(codes.Internal, "failed to marshal resolve request: %v", err)
 	}
 
-	req, err := http.NewRequest(http.MethodPost, verifier.ingestResolveURL, bytes.NewReader(reqBody))
+	req, err := http.NewRequest(http.MethodPost, verifier.ingestionResolveURL, bytes.NewReader(reqBody))
 	if err != nil {
 		return cachedIngestAssertion{}, status.Errorf(codes.Internal, "failed to build resolve request: %v", err)
 	}
@@ -290,7 +290,7 @@ func resolveIngestKey(token string, verifier *Verifier, now time.Time) (cachedIn
 	}
 	resp, err := httpClient.Do(req)
 	if err != nil {
-		return cachedIngestAssertion{}, status.Errorf(codes.Unavailable, "ingest key resolution request failed: %v", err)
+		return cachedIngestAssertion{}, status.Errorf(codes.Unavailable, "ingestion key resolution request failed: %v", err)
 	}
 	defer resp.Body.Close()
 
@@ -298,18 +298,18 @@ func resolveIngestKey(token string, verifier *Verifier, now time.Time) (cachedIn
 		return cachedIngestAssertion{}, status.Error(codes.Unauthenticated, "invalid ingestion key")
 	}
 	if resp.StatusCode != http.StatusOK {
-		return cachedIngestAssertion{}, status.Errorf(codes.Unavailable, "ingest key resolution failed with status %d", resp.StatusCode)
+		return cachedIngestAssertion{}, status.Errorf(codes.Unavailable, "ingestion key resolution failed with status %d", resp.StatusCode)
 	}
 
 	bodyBytes, err := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
 	if err != nil {
-		return cachedIngestAssertion{}, status.Errorf(codes.Unavailable, "failed to read ingest key resolution response: %v", err)
+		return cachedIngestAssertion{}, status.Errorf(codes.Unavailable, "failed to read ingestion key resolution response: %v", err)
 	}
 	var payload struct {
 		Assertion string `json:"assertion"`
 	}
 	if err := json.Unmarshal(bodyBytes, &payload); err != nil || strings.TrimSpace(payload.Assertion) == "" {
-		return cachedIngestAssertion{}, status.Error(codes.Unauthenticated, "invalid ingest key resolution response")
+		return cachedIngestAssertion{}, status.Error(codes.Unauthenticated, "invalid ingestion key resolution response")
 	}
 
 	scope, expUnix, err := verifyAssertionAndScope(payload.Assertion, verifier, now.Unix())
@@ -331,7 +331,7 @@ func resolveIngestKey(token string, verifier *Verifier, now time.Time) (cachedIn
 	}
 	if cacheUntil.After(now) {
 		verifier.cacheMu.Lock()
-		verifier.ingestCache[key] = entry
+		verifier.ingestionCache[key] = entry
 		verifier.cacheMu.Unlock()
 	}
 	return entry, nil

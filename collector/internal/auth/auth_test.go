@@ -222,7 +222,7 @@ func TestParseInboundResolvesSpkViaExplorerAndCaches(t *testing.T) {
 	var calls atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls.Add(1)
-		if r.URL.Path != "/api/internal/ingest-key/resolve" {
+		if r.URL.Path != "/api/internal/ingestion-key/resolve" {
 			t.Errorf("unexpected path: %s", r.URL.Path)
 			w.WriteHeader(http.StatusNotFound)
 			return
@@ -260,21 +260,21 @@ func TestParseInboundResolvesSpkViaExplorerAndCaches(t *testing.T) {
 		if svcClaims.Iss != "softprobe-thelake" || svcClaims.Aud != "sp-explorer" ||
 			svcClaims.Sub != "thelake-collector" ||
 			svcClaims.WorkspaceID != "00000000-0000-0000-0000-000000000000" ||
-			len(svcClaims.Capabilities) != 1 || svcClaims.Capabilities[0] != "resolve_ingest_key" {
+			len(svcClaims.Capabilities) != 1 || svcClaims.Capabilities[0] != "resolve_ingestion_key" {
 			t.Errorf("unexpected service claims: %+v", svcClaims)
 			w.WriteHeader(http.StatusForbidden)
 			return
 		}
 
 		var body struct {
-			APIKey string `json:"apiKey"`
+			IngestionKey string `json:"ingestionKey"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			t.Errorf("decode body: %v", err)
 			w.WriteHeader(http.StatusBadRequest)
 			return
 		}
-		switch body.APIKey {
+		switch body.IngestionKey {
 		case "spk_live_valid":
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(map[string]string{"assertion": expectedAssertion})
@@ -284,7 +284,7 @@ func TestParseInboundResolvesSpkViaExplorerAndCaches(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	t.Setenv("SOFTPROBE_INGEST_KEY_RESOLVE_URL", "")
+	t.Setenv("INGESTION_KEY_RESOLVE_URL", "")
 	t.Setenv("SOFTPROBE_EXPLORER_URL", srv.URL)
 	verifier := NewVerifier(testSecret)
 

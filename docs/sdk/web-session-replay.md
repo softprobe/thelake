@@ -90,7 +90,7 @@ cd sp-llm/apps/explorer && npm test && npm run typecheck
 # stack
 cd sp-llm && make e2e-up
 # softprobe-code: sibling softprobe-js required until @softprobe/web-record is published
-# export SOFTPROBE_BASE_URL=http://127.0.0.1:8091 SOFTPROBE_PUBLIC_KEY=e2e-token
+# export INGESTION_KEY=e2e-token OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://127.0.0.1:8091/v1/traces
 ```
 
 ### Browser CORS

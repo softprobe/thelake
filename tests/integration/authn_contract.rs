@@ -10,7 +10,7 @@ async fn resolve_empty_key_fails() {
     let server = MockServer::start().await;
     let r = Resolver::new(server.uri(), Duration::from_secs(60));
     let err = r.resolve("").await.expect_err("empty key");
-    assert!(err.to_string().contains("empty API key"), "{err}");
+    assert!(err.to_string().contains("empty Softprobe API Key"), "{err}");
 }
 
 #[tokio::test]
@@ -54,7 +54,10 @@ async fn resolve_invalid_success_payload_fails() {
 
     let r = Resolver::new(format!("{}/", server.uri()), Duration::from_secs(60));
     let err = r.resolve("k").await.expect_err("invalid key");
-    assert!(err.to_string().contains("invalid API key"), "{err}");
+    assert!(
+        err.to_string().contains("invalid Softprobe API Key"),
+        "{err}"
+    );
 }
 
 #[tokio::test]

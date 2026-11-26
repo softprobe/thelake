@@ -113,7 +113,7 @@ GitHub Actions (Make-only; cache under `~/.cache/thelake` via
 ```bash
 export CONFIG_FILE=config.yaml
 export SOFTPROBE_ADMIN_API_KEY=dev-admin
-export SOFTPROBE_ASSERTION_HMAC_SECRET=dev-assertion
+export ASSERTION_HMAC_SECRET=dev-assertion
 make run
 ```
 

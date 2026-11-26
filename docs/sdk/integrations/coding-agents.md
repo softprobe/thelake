@@ -32,14 +32,18 @@ Labels: `sp.user.id`, `sp.session.id`, `deployment.environment.name`,
 
 ## Auth
 
-Softprobe OTLP uses a **bearer** token:
+Send telemetry with an Agent Ingestion Key. It is bound to an Agent and has
+ingest-only permission:
 
-```http
-Authorization: Bearer <publicKey>
+```bash
+export INGESTION_KEY="<Agent Ingestion Key>"
+export OTEL_EXPORTER_OTLP_TRACES_ENDPOINT="https://thelake.softprobe.ai/v1/traces"
+export OTEL_EXPORTER_OTLP_TRACES_HEADERS="Authorization=Bearer ${INGESTION_KEY}"
+export OTEL_EXPORTER_OTLP_TRACES_PROTOCOL="http/protobuf"
 ```
 
-Configure `SOFTPROBE_PUBLIC_KEY`, `SOFTPROBE_BASE_URL`, and
-`SOFTPROBE_OTLP_ENDPOINT` (or the OpenCode config file).
+Use `SOFTPROBE_API_KEY` for session reads and other query requests. An Agent
+Ingestion Key cannot read sessions.
 
 ## Content capture
 
@@ -66,14 +70,18 @@ evaluation and agent improvement.
    `~/.config/opencode/opencode-softprobe.json`:
 
 ```bash
-export SOFTPROBE_PUBLIC_KEY="<bearer-token>"
-export SOFTPROBE_BASE_URL="https://thelake.softprobe.ai"
+export INGESTION_KEY="<Agent Ingestion Key>"
+export OTEL_EXPORTER_OTLP_TRACES_ENDPOINT="https://thelake.softprobe.ai/v1/traces"
+export OTEL_EXPORTER_OTLP_TRACES_HEADERS="Authorization=Bearer ${INGESTION_KEY}"
+export OTEL_EXPORTER_OTLP_TRACES_PROTOCOL="http/protobuf"
 ```
 
 ```json
 {
-  "publicKey": "<bearer-token>",
-  "baseUrl": "https://thelake.softprobe.ai",
+  "ingestionKey": "<Agent Ingestion Key>",
+  "otlp": {
+    "tracesEndpoint": "https://thelake.softprobe.ai/v1/traces"
+  },
   "environment": "production"
 }
 ```
@@ -82,8 +90,10 @@ export SOFTPROBE_BASE_URL="https://thelake.softprobe.ai"
    [explorer.softprobe.ai](https://explorer.softprobe.ai) or via API:
 
 ```bash
+export SOFTPROBE_API_KEY="<Softprobe API key>"
+
 curl -sS -X POST https://thelake.softprobe.ai/v1/spans/search \
-  -H "Authorization: Bearer $SOFTPROBE_PUBLIC_KEY" \
+  -H "Authorization: Bearer $SOFTPROBE_API_KEY" \
   -H "Content-Type: application/json" \
   -H "User-Agent: Mozilla/5.0" \
   -d '{"from":"2026-01-01T00:00:00Z","to":"2100-01-01T00:00:00Z","observation_types":["agent"],"limit":20}'
@@ -93,14 +103,8 @@ Use the OpenCode `sessionID` as `session_id` / `sp.session.id`.
 
 Package details: [`@softprobe/opencode-plugin`](https://github.com/softprobe/softprobe-js/tree/main/packages/opencode-plugin).
 
-Local verification (synthetic hooks → thelake):
+Run the OpenCode plugin tests from the `softprobe-js` checkout:
 
 ```bash
-make opencode-plugin-e2e
-make opencode-plugin-e2e-inspect
-
-# Against production thelake:
-THELAKE_URL=https://thelake.softprobe.ai \
-THELAKE_TOKEN=sp-llm-smoke-token \
-  make opencode-plugin-e2e
+npm run test -w @softprobe/opencode-plugin
 ```
