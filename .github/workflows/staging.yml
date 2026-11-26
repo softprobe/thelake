@@ -194,7 +194,7 @@ jobs:
           location: us-central1
           project_id: cs-poc-sasxbttlzroculpau4u6e2l
 
-      - name: Apply staging manifests without Secrets
+      - name: Apply staging manifests without Secrets or bootstrap Jobs
         if: steps.freshness.outputs.deployed == 'true'
         working-directory: deployment-k8s
         run: |
@@ -204,16 +204,15 @@ jobs:
           from pathlib import Path
           import re
 
+          # Skip Secrets (managed out-of-band) and Jobs (immutable spec.template; deployer RBAC lacks jobs.delete).
           documents = Path("/tmp/staging-all.yaml").read_text().split("\n---\n")
           kept = [
               document
               for document in documents
-              if not re.search(r"^kind:\s*Secret\b", document, re.MULTILINE)
+              if not re.search(r"^kind:\s*(?:Secret|Job)\b", document, re.MULTILINE)
           ]
           Path("/tmp/staging-apply.yaml").write_text("\n---\n".join(kept))
           PY
-          # Kubernetes Jobs have immutable spec.template; replace cleanly on each deploy.
-          kubectl -n staging delete job/thelake-apply-llm-v1 --ignore-not-found
           kubectl apply -f /tmp/staging-apply.yaml
           kubectl -n staging delete deployment/thelake-collector service/thelake-collector --ignore-not-found
           kubectl -n staging rollout status deployment/thelake --timeout=5m
