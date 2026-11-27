@@ -97,7 +97,11 @@ pub fn synthesize_codex_spans_from_logs(
             "codex.api_request" => {
                 attrs.insert("sp.observation.type".into(), "generation".into());
                 attrs.insert("gen_ai.operation.name".into(), "chat".into());
-                if let Some(err) = log.attributes.get("error.message").filter(|s| !s.is_empty()) {
+                if let Some(err) = log
+                    .attributes
+                    .get("error.message")
+                    .filter(|s| !s.is_empty())
+                {
                     status_code = Some("ERROR".to_string());
                     status_message = Some(err.clone());
                 } else if let Some(code) = log
@@ -125,13 +129,37 @@ pub fn synthesize_codex_spans_from_logs(
                 }
                 attrs.insert("sp.observation.type".into(), "generation".into());
                 attrs.insert("gen_ai.operation.name".into(), "chat".into());
-                copy_int_attr(&log.attributes, &mut attrs, "input_token_count", "gen_ai.usage.input_tokens");
-                copy_int_attr(&log.attributes, &mut attrs, "output_token_count", "gen_ai.usage.output_tokens");
-                copy_int_attr(&log.attributes, &mut attrs, "cached_token_count", "gen_ai.usage.cache_read_input_tokens");
-                copy_int_attr(&log.attributes, &mut attrs, "reasoning_token_count", "gen_ai.usage.reasoning_tokens");
+                copy_int_attr(
+                    &log.attributes,
+                    &mut attrs,
+                    "input_token_count",
+                    "gen_ai.usage.input_tokens",
+                );
+                copy_int_attr(
+                    &log.attributes,
+                    &mut attrs,
+                    "output_token_count",
+                    "gen_ai.usage.output_tokens",
+                );
+                copy_int_attr(
+                    &log.attributes,
+                    &mut attrs,
+                    "cached_token_count",
+                    "gen_ai.usage.cache_read_input_tokens",
+                );
+                copy_int_attr(
+                    &log.attributes,
+                    &mut attrs,
+                    "reasoning_token_count",
+                    "gen_ai.usage.reasoning_tokens",
+                );
                 if let (Some(inp), Some(out)) = (
-                    attrs.get("gen_ai.usage.input_tokens").and_then(|v| v.parse::<i64>().ok()),
-                    attrs.get("gen_ai.usage.output_tokens").and_then(|v| v.parse::<i64>().ok()),
+                    attrs
+                        .get("gen_ai.usage.input_tokens")
+                        .and_then(|v| v.parse::<i64>().ok()),
+                    attrs
+                        .get("gen_ai.usage.output_tokens")
+                        .and_then(|v| v.parse::<i64>().ok()),
                 ) {
                     attrs.insert("gen_ai.usage.total_tokens".into(), (inp + out).to_string());
                 }
@@ -308,14 +336,35 @@ mod tests {
 
         assert_eq!(spans[0].message_type, "codex.user");
         assert_eq!(spans[0].session_id, "conv-codex-123");
-        assert_eq!(spans[0].attributes.get("sp.input").map(String::as_str), Some("Fix failing tests"));
+        assert_eq!(
+            spans[0].attributes.get("sp.input").map(String::as_str),
+            Some("Fix failing tests")
+        );
 
         assert_eq!(spans[1].message_type, "codex.generation");
-        assert_eq!(spans[1].attributes.get("sp.observation.type").map(String::as_str), Some("generation"));
-        assert_eq!(spans[1].attributes.get("gen_ai.usage.total_tokens").map(String::as_str), Some("165"));
+        assert_eq!(
+            spans[1]
+                .attributes
+                .get("sp.observation.type")
+                .map(String::as_str),
+            Some("generation")
+        );
+        assert_eq!(
+            spans[1]
+                .attributes
+                .get("gen_ai.usage.total_tokens")
+                .map(String::as_str),
+            Some("165")
+        );
 
         assert_eq!(spans[2].message_type, "codex.tool.shell");
-        assert_eq!(spans[2].attributes.get("gen_ai.tool.name").map(String::as_str), Some("shell"));
+        assert_eq!(
+            spans[2]
+                .attributes
+                .get("gen_ai.tool.name")
+                .map(String::as_str),
+            Some("shell")
+        );
         assert_eq!(spans[2].status_code.as_deref(), Some("ERROR"));
         assert_eq!(spans[2].workspace_id.as_deref(), Some("ws-1"));
         assert_eq!(spans[2].agent_id.as_deref(), Some("agent-1"));
