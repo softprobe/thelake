@@ -370,9 +370,19 @@ async fn process_logs_inner(
         log.agent_id = agent_id.clone();
         log.agent_name = agent_name.clone();
     }
+    let mut codex_spans = crate::models::codex::synthesize_codex_spans_from_logs(
+        &logs,
+        &workspace_id,
+        agent_id.as_deref(),
+        agent_name.as_deref(),
+    );
     let ws = state.workspace_for_id(&workspace_id).await?;
     let write_start = std::time::Instant::now();
     ws.ingest().add_logs(logs, body_size).await?;
+    if !codex_spans.is_empty() {
+        crate::models::span::validate_and_normalize_ingest_batch(&mut codex_spans)?;
+        ws.ingest().add_spans(codex_spans, 0).await?;
+    }
     if crate::self_monitoring::instrument_customer_workspace(&workspace_id) {
         crate::self_monitoring::record_write(
             &workspace_id,
