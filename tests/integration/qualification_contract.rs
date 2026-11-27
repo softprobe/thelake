@@ -448,20 +448,11 @@ async fn sql_maintenance_merge_preserves_ducklake_layout() {
     );
 
     let settings: std::collections::HashMap<String, String> = {
-        let table_options = format!(
-            "SELECT key, value FROM {metadata}.ducklake_metadata \
-             WHERE scope = 'table' AND scope_id = ( \
-               SELECT t.table_id::VARCHAR FROM {metadata}.ducklake_table t \
-               JOIN {metadata}.ducklake_schema s ON s.schema_id = t.schema_id \
-               WHERE t.table_name = 'traces' AND s.schema_name = '{}' \
-                 AND t.end_snapshot IS NULL) \
-             AND key IN ('target_file_size', 'parquet_row_group_size_bytes', \
-                         'parquet_compression', 'parquet_compression_level')",
-            schema.replace('\'', "''")
-        );
+        let table_options = include_str!("../fixtures/ducklake_table_options.sql")
+            .replace("{{METADATA}}", &metadata);
         let mut statement = conn.prepare(&table_options).expect("prepare table options");
         statement
-            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .query_map([&schema], |row| Ok((row.get(0)?, row.get(1)?)))
             .expect("read table options")
             .collect::<duckdb::Result<_>>()
             .expect("collect table options")
