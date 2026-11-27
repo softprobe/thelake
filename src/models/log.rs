@@ -190,6 +190,7 @@ impl Log {
                 || attr.key == "session_id"
                 || attr.key == "sp.session.id"
                 || attr.key == "gen_ai.conversation.id"
+                || attr.key == "conversation.id"
             {
                 if let Some(value) = &attr.value {
                     if let Some(
@@ -208,6 +209,7 @@ impl Log {
             .or_else(|| resource_attributes.get("session_id"))
             .or_else(|| resource_attributes.get("sp.session.id"))
             .or_else(|| resource_attributes.get("gen_ai.conversation.id"))
+            .or_else(|| resource_attributes.get("conversation.id"))
             .cloned()
     }
 
